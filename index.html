@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>🧠 VR Brain Map</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#020818; overflow:hidden; font-family:system-ui,sans-serif; color:#fff; }
+
+    #overlay {
+      position:fixed; inset:0;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      background:#020818; z-index:99; transition:opacity .8s;
+    }
+    #overlay h1 {
+      font-size:2.8rem; font-weight:900; letter-spacing:.05em;
+      background:linear-gradient(135deg,#00e5ff,#aa00ff);
+      -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+      background-clip:text;
+    }
+    #overlay p { color:#4a6080; margin:.5rem 0 1.6rem; font-size:.95rem; }
+    #bar { width:280px; height:4px; background:#0d1a30; border-radius:4px; overflow:hidden; }
+    #fill { height:100%; background:linear-gradient(90deg,#00e5ff,#aa00ff); width:0%; transition:width .3s; }
+    #status { color:#334455; font-size:.78rem; margin-top:.6rem; }
+
+    #hud {
+      position:fixed; top:14px; left:14px;
+      pointer-events:none; font-size:12px; color:rgba(255,255,255,.5);
+      line-height:1.6;
+    }
+    #hud strong { display:block; color:#00e5ff; font-size:15px; font-weight:700; margin-bottom:2px; }
+
+    #legend {
+      position:fixed; top:14px; right:14px;
+      pointer-events:none; font-size:11px; color:rgba(255,255,255,.6);
+    }
+    .li { display:flex; align-items:center; gap:7px; margin-bottom:5px; }
+    .dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+
+    #info {
+      position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+      background:rgba(2,8,24,.93);
+      border:1px solid rgba(0,229,255,.2);
+      border-radius:11px; padding:11px 20px; min-width:200px; text-align:center;
+      display:none; pointer-events:none;
+      box-shadow:0 0 28px rgba(0,229,255,.1);
+    }
+    #info .n { font-size:1.05rem; font-weight:700; color:#00e5ff; }
+    #info .f { font-size:.73rem; color:#607080; margin-top:3px; }
+
+    #hint {
+      position:fixed; bottom:14px; right:14px;
+      font-size:10px; color:rgba(80,120,160,.45);
+      pointer-events:none; text-align:right; line-height:1.8;
+    }
+
+    /* VR Button override */
+    #VRButton {
+      position:fixed !important; bottom:22px !important; left:14px !important;
+      transform:none !important;
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>🧠 VR BRAIN</h1>
+  <p>Loading your knowledge graph…</p>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="status">Initialising…</div>
+</div>
+
+<div id="hud">
+  <strong>🧠 VR BRAIN MAP</strong>
+  <span id="stats"></span>
+</div>
+
+<div id="legend"></div>
+
+<div id="info">
+  <div class="n" id="iname">—</div>
+  <div class="f" id="ipath">—</div>
+</div>
+
+<div id="hint">
+  Desktop: drag · scroll · click node<br>
+  Quest VR: L-stick = move · R-stick Y = fly · Trigger = inspect · Both pinch = zoom · R-pinch = grab
+</div>
+
+<script type="module">
+// ─────────────────────────────────────────────────────────────────────────────
+// Imports  (esm.sh CDN — works on Quest 3 browser)
+// ─────────────────────────────────────────────────────────────────────────────
+import * as THREE          from 'https://esm.sh/three@0.153.0';
+import { VRButton }        from 'https://esm.sh/three@0.153.0/examples/jsm/webxr/VRButton.js';
+import { OrbitControls }   from 'https://esm.sh/three@0.153.0/examples/jsm/controls/OrbitControls.js';
+import { XRHandModelFactory } from 'https://esm.sh/three@0.153.0/examples/jsm/webxr/XRHandModelFactory.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Progress helper
+// ─────────────────────────────────────────────────────────────────────────────
+const prog = (pct, msg) => {
+  document.getElementById('fill').style.width = pct + '%';
+  document.getElementById('status').textContent = msg;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Folder → colour
+// ─────────────────────────────────────────────────────────────────────────────
+const PALETTE = {
+  CLUE:     0x00ffff,  // neon cyan
+  HOME:     0x39ff14,  // neon green
+  PHYSICAL: 0xff6600,  // neon orange
+  XVY:      0xff00ff,  // hot magenta
+  ALSTOM:   0x00b4ff,  // electric blue
+  FINANCE:  0xffe600,  // electric yellow
+};
+const folderClr = f => PALETTE[f?.toUpperCase()] ?? 0x889aaa;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Renderer + scene
+// ─────────────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020818);
+scene.fog = new THREE.FogExp2(0x020818, 0.005);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 800);
+camera.position.set(0, 4, 50);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer, {
+  optionalFeatures: ['hand-tracking', 'local-floor'],
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lighting
+// ─────────────────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x223366, 4));
+const sunLight = new THREE.DirectionalLight(0x88aaff, 2);
+sunLight.position.set(30, 50, 10);
+scene.add(sunLight);
+const accentLight = new THREE.PointLight(0xaa00ff, 1.5, 120, 2);
+scene.add(accentLight);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stars
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const n = 3000;
+  const pos = new Float32Array(n * 3);
+  for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() - 0.5) * 600;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.22, sizeAttenuation: true })));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// World group  — all graph content lives here.
+// Moving this group is how VR locomotion works (move world ≡ move player).
+// ─────────────────────────────────────────────────────────────────────────────
+const world = new THREE.Group();
+scene.add(world);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Desktop orbit controls
+// ─────────────────────────────────────────────────────────────────────────────
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.06;
+orbit.target.set(0, 0, 0);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Text sprite helper
+// ─────────────────────────────────────────────────────────────────────────────
+function makeLabel(text, hexCol) {
+  const cv  = document.createElement('canvas');
+  const ctx = cv.getContext('2d');
+  const fs  = 36;
+  ctx.font = `bold ${fs}px Arial`;
+  cv.width  = Math.ceil(ctx.measureText(text).width) + 26;
+  cv.height = fs + 16;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = 'rgba(2,8,28,.82)';
+  if (ctx.roundRect) ctx.roundRect(0, 0, cv.width, cv.height, 7);
+  else ctx.rect(0, 0, cv.width, cv.height);
+  ctx.fill();
+  const r = (hexCol >> 16) & 255, g = (hexCol >> 8) & 255, b = hexCol & 255;
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.font = `bold ${fs}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, cv.width / 2, cv.height / 2);
+  const tex = new THREE.CanvasTexture(cv);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  spr.scale.set((cv.width / cv.height) * 2.2, 2.2, 1);
+  return spr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3-D force-directed layout
+// ─────────────────────────────────────────────────────────────────────────────
+function forceLayout(nodes, links, steps = 280) {
+  const pos = {}, vel = {};
+  nodes.forEach(n => {
+    const θ = Math.random() * Math.PI * 2;
+    const φ = Math.acos(2 * Math.random() - 1);
+    const r = 14 + Math.random() * 16;
+    pos[n.id] = new THREE.Vector3(
+      r * Math.sin(φ) * Math.cos(θ),
+      r * Math.sin(φ) * Math.sin(θ),
+      r * Math.cos(φ)
+    );
+    vel[n.id] = new THREE.Vector3();
+  });
+
+  const tmp = new THREE.Vector3();
+
+  for (let it = 0; it < steps; it++) {
+    const F = {};
+    nodes.forEach(n => { F[n.id] = new THREE.Vector3(); });
+
+    // Repulsion (all pairs)
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        tmp.copy(pos[nodes[i].id]).sub(pos[nodes[j].id]);
+        const d = Math.max(tmp.length(), 0.5);
+        tmp.normalize().multiplyScalar(110 / (d * d));
+        F[nodes[i].id].add(tmp);
+        F[nodes[j].id].sub(tmp);
+      }
+    }
+
+    // Attraction (linked pairs)
+    links.forEach(l => {
+      if (!pos[l.source] || !pos[l.target]) return;
+      tmp.copy(pos[l.target]).sub(pos[l.source]);
+      const d = tmp.length();
+      tmp.normalize().multiplyScalar(0.04 * d);
+      F[l.source].add(tmp);
+      F[l.target].sub(tmp);
+    });
+
+    // Centre gravity
+    nodes.forEach(n => { F[n.id].addScaledVector(pos[n.id], -0.007); });
+
+    // Integrate
+    nodes.forEach(n => {
+      vel[n.id].add(F[n.id]).multiplyScalar(0.83);
+      pos[n.id].add(vel[n.id]);
+    });
+  }
+  return pos;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load graph data and build scene
+// ─────────────────────────────────────────────────────────────────────────────
+prog(10, 'Fetching graph data…');
+const { nodes, links } = await fetch('graph.json').then(r => r.json());
+
+prog(30, `${nodes.length} pages · ${links.length} links — computing layout…`);
+
+// Node degree (for sizing)
+const deg = {};
+nodes.forEach(n => { deg[n.id] = 0; });
+links.forEach(l => {
+  deg[l.source] = (deg[l.source] || 0) + 1;
+  deg[l.target] = (deg[l.target] || 0) + 1;
+});
+
+// Run layout
+const positions = forceLayout(nodes, links);
+
+prog(65, 'Building 3D graph…');
+
+// Material cache (shared per colour)
+const matCache = {};
+function getMat(col) {
+  if (!matCache[col]) {
+    matCache[col] = new THREE.MeshStandardMaterial({
+      color: col, emissive: col, emissiveIntensity: 0.45,
+      roughness: 0.25, metalness: 0.65,
+    });
+  }
+  return matCache[col];
+}
+
+// Build node meshes + labels
+const nodeMeshes = [];
+
+nodes.forEach((node, idx) => {
+  const col = folderClr(node.folder);
+  const radius = 0.5 + Math.min(deg[node.id] || 0, 12) * 0.17;
+
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 18, 14),
+    getMat(col)
+  );
+  mesh.position.copy(positions[node.id]);
+  mesh.userData = { node, col, radius, breathOffset: idx * 0.41 };
+  world.add(mesh);
+  nodeMeshes.push(mesh);
+
+  const label = makeLabel(node.name, col);
+  label.position.copy(positions[node.id]);
+  label.position.y += radius + 1.4;
+  world.add(label);
+});
+
+// Build edges
+{
+  const verts = [];
+  links.forEach(l => {
+    if (positions[l.source] && positions[l.target]) {
+      verts.push(...positions[l.source].toArray(), ...positions[l.target].toArray());
+    }
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  world.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    color: 0x1a3355, transparent: true, opacity: 0.5,
+  })));
+}
+
+// Legend
+{
+  const el = document.getElementById('legend');
+  const folders = [...new Set(nodes.map(n => n.folder))].sort();
+  folders.forEach(f => {
+    const hex = folderClr(f).toString(16).padStart(6, '0');
+    const div = document.createElement('div');
+    div.className = 'li';
+    div.innerHTML = `<div class="dot" style="background:#${hex}"></div>${f}`;
+    el.appendChild(div);
+  });
+  document.getElementById('stats').textContent = `${nodes.length} pages · ${links.length} links`;
+}
+
+prog(100, 'Ready!');
+setTimeout(() => {
+  const ov = document.getElementById('overlay');
+  ov.style.opacity = '0';
+  setTimeout(() => ov.remove(), 850);
+}, 350);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Desktop raycasting + selection
+// ─────────────────────────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const pointer   = new THREE.Vector2();
+let selected = null;
+const infoEl = document.getElementById('info');
+
+renderer.domElement.addEventListener('click', e => {
+  if (renderer.xr.isPresenting) return;
+  pointer.x =  (e.clientX / innerWidth)  * 2 - 1;
+  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(nodeMeshes);
+  if (hits.length) pickNode(hits[0].object);
+  else clearPick();
+});
+
+function pickNode(mesh) {
+  if (selected) {
+    selected.material.emissiveIntensity = 0.45;
+    selected.scale.setScalar(1);
+  }
+  selected = mesh;
+  mesh.material.emissiveIntensity = 1.5;
+  mesh.scale.setScalar(1.6);
+  const nd = mesh.userData.node;
+  document.getElementById('iname').textContent = nd.name;
+  document.getElementById('ipath').textContent = `📁 ${nd.folder}  ·  ${nd.path}`;
+  infoEl.style.display = 'block';
+}
+
+function clearPick() {
+  if (selected) {
+    selected.material.emissiveIntensity = 0.45;
+    selected.scale.setScalar(1);
+    selected = null;
+  }
+  infoEl.style.display = 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VR controllers
+// ─────────────────────────────────────────────────────────────────────────────
+const ctrl0 = renderer.xr.getController(0);
+const ctrl1 = renderer.xr.getController(1);
+scene.add(ctrl0);
+scene.add(ctrl1);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hand models
+// ─────────────────────────────────────────────────────────────────────────────
+const handFactory = new XRHandModelFactory();
+const hand0 = renderer.xr.getHand(0);
+const hand1 = renderer.xr.getHand(1);
+hand0.add(handFactory.createHandModel(hand0, 'spheres'));
+hand1.add(handFactory.createHandModel(hand1, 'spheres'));
+scene.add(hand0);
+scene.add(hand1);
+
+// Controller ray lines
+[ctrl0, ctrl1].forEach(c => {
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -15),
+  ]);
+  c.add(new THREE.Line(geo, new THREE.LineBasicMaterial({
+    color: 0x00e5ff, transparent: true, opacity: 0.45,
+  })));
+  c.addEventListener('selectstart', () => vrSelect(c));
+});
+
+// VR select — show floating info panel
+const rayMat = new THREE.Matrix4();
+let vrPanel = null;
+
+function vrSelect(ctrl) {
+  rayMat.identity().extractRotation(ctrl.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(rayMat);
+  const hits = raycaster.intersectObjects(nodeMeshes);
+  if (!hits.length) return;
+
+  const nd = hits[0].object.userData.node;
+  if (vrPanel) scene.remove(vrPanel);
+
+  // Draw panel on canvas
+  const cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 130;
+  const cx = cv.getContext('2d');
+  cx.fillStyle = 'rgba(2,8,40,.96)';
+  cx.fillRect(0, 0, 512, 130);
+  cx.strokeStyle = 'rgba(0,229,255,.55)';
+  cx.lineWidth = 3;
+  cx.strokeRect(2, 2, 508, 126);
+  cx.fillStyle = '#00e5ff';
+  cx.font = 'bold 44px Arial';
+  cx.textAlign = 'center';
+  cx.fillText(nd.name, 256, 56);
+  cx.fillStyle = '#607888';
+  cx.font = '22px Arial';
+  cx.fillText(`${nd.folder}  ·  ${nd.path}`, 256, 100);
+
+  const tex = new THREE.CanvasTexture(cv);
+  vrPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(4.5, 1.15),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide })
+  );
+  vrPanel.position.copy(hits[0].point);
+  vrPanel.position.y += 1.9;
+  vrPanel.quaternion.copy(camera.quaternion);
+  scene.add(vrPanel);
+  setTimeout(() => { if (vrPanel) { scene.remove(vrPanel); vrPanel = null; } }, 5000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VR locomotion  (world moves, player stays — equivalent to flying through graph)
+// Left stick  → move forward/back/strafe
+// Right stick Y → fly up/down
+// Right stick X → rotate (turn-in-place)
+// ─────────────────────────────────────────────────────────────────────────────
+const _fwd = new THREE.Vector3();
+const _rgt = new THREE.Vector3();
+const _up  = new THREE.Vector3(0, 1, 0);
+
+function locomote() {
+  const sess = renderer.xr.getSession();
+  if (!sess) return;
+
+  const xrCam = renderer.xr.getCamera(camera);
+  const speed = 0.1;
+
+  for (const src of sess.inputSources) {
+    if (!src.gamepad) continue;
+    const ax = src.gamepad.axes;
+    const lx = ax[2] ?? 0;  // thumbstick X
+    const ly = ax[3] ?? 0;  // thumbstick Y
+
+    if (src.handedness === 'left') {
+      // Forward / strafe
+      if (Math.abs(lx) > 0.12 || Math.abs(ly) > 0.12) {
+        xrCam.getWorldDirection(_fwd);
+        _fwd.y = 0;
+        if (_fwd.lengthSq() < 0.001) _fwd.set(0, 0, -1);
+        _fwd.normalize();
+        _rgt.crossVectors(_fwd, _up).normalize();
+        // Move world opposite direction = player moves forward
+        world.position.addScaledVector(_fwd,  ly * speed);
+        world.position.addScaledVector(_rgt, -lx * speed);
+      }
+    } else {
+      // Vertical fly
+      if (Math.abs(ly) > 0.12) {
+        world.position.y += ly * speed;
+      }
+      // Snap / smooth turn — rotate world around HMD position
+      if (Math.abs(lx) > 0.12) {
+        const camWP = new THREE.Vector3();
+        xrCam.getWorldPosition(camWP);
+        world.position.sub(camWP);
+        world.position.applyAxisAngle(_up, lx * 0.025);
+        world.position.add(camWP);
+        world.rotation.y += lx * 0.025;
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resize
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two-hand pinch → zoom + rotate  |  Right-hand pinch alone → grab
+// ─────────────────────────────────────────────────────────────────────────────
+let prevPinchDist    = null;
+let prevRightGrabPos = null;
+let prevHandVec      = null;
+const _lPinch    = new THREE.Vector3();
+const _rPinch    = new THREE.Vector3();
+const _handVec   = new THREE.Vector3();
+const _deltaQuat = new THREE.Quaternion();
+
+// Hysteresis: tighter threshold to START pinching, looser to RELEASE
+// Prevents accidental triggers and flickering
+const PINCH_ENTER = 0.025; // 2.5 cm — must close this far to begin
+const PINCH_EXIT  = 0.05;  // 5.0 cm — must open this far to end
+let leftWasPinching  = false;
+let rightWasPinching = false;
+
+function handlePinchZoom(frame) {
+  if (!frame) return;
+  const sess = renderer.xr.getSession();
+  if (!sess) return;
+  const refSpace = renderer.xr.getReferenceSpace();
+  if (!refSpace) return;
+
+  let leftPinching = false, rightPinching = false;
+
+  for (const src of sess.inputSources) {
+    if (!src.hand) continue;
+    const thumbTip = src.hand.get('thumb-tip');
+    const indexTip = src.hand.get('index-finger-tip');
+    if (!thumbTip || !indexTip) continue;
+    const tPose = frame.getJointPose(thumbTip, refSpace);
+    const iPose = frame.getJointPose(indexTip, refSpace);
+    if (!tPose || !iPose) continue;
+
+    const tp = tPose.transform.position;
+    const ip = iPose.transform.position;
+    const dist = Math.hypot(tp.x - ip.x, tp.y - ip.y, tp.z - ip.z);
+
+    // Hysteresis: use different thresholds to enter vs exit pinch state
+    const wasP = src.handedness === 'left' ? leftWasPinching : rightWasPinching;
+    const pinching = wasP ? dist < PINCH_EXIT : dist < PINCH_ENTER;
+    if (src.handedness === 'left')  leftWasPinching  = pinching;
+    else                            rightWasPinching = pinching;
+
+    const mid = new THREE.Vector3(
+      (tp.x + ip.x) / 2,
+      (tp.y + ip.y) / 2,
+      (tp.z + ip.z) / 2
+    );
+    if (src.handedness === 'left')  { leftPinching  = pinching; _lPinch.copy(mid); }
+    else                            { rightPinching = pinching; _rPinch.copy(mid); }
+  }
+
+  if (leftPinching && rightPinching) {
+    // ── Two-hand pinch → zoom + rotate ────────────────────────────────────
+    const d = _lPinch.distanceTo(_rPinch);
+    // Midpoint of both pinches — pivot for rotation
+    const mid = new THREE.Vector3().addVectors(_lPinch, _rPinch).multiplyScalar(0.5);
+    // Unit vector from left pinch to right pinch — encodes orientation
+    _handVec.copy(_rPinch).sub(_lPinch).normalize();
+
+    if (prevPinchDist !== null && d > 0.01) {
+      // Zoom
+      const factor = d / prevPinchDist;
+      const next = world.scale.x * factor;
+      if (next > 0.01 && next < 6) world.scale.setScalar(next);
+
+      // Rotate — only when orientation changed meaningfully
+      if (prevHandVec !== null) {
+        const dot = _handVec.dot(prevHandVec);
+        if (dot < 0.9998 && dot > -0.9998) {
+          _deltaQuat.setFromUnitVectors(prevHandVec, _handVec);
+          // Rotate world around the midpoint of both hands
+          world.position.sub(mid);
+          world.position.applyQuaternion(_deltaQuat);
+          world.quaternion.premultiply(_deltaQuat);
+          world.position.add(mid);
+        }
+      }
+    }
+
+    prevPinchDist = d;
+    prevHandVec   = _handVec.clone();
+    prevRightGrabPos = null;
+
+  } else if (rightPinching && !leftPinching) {
+    // ── Right-hand pinch alone → grab & reposition ────────────────────────
+    if (prevRightGrabPos !== null) {
+      const delta = _rPinch.clone().sub(prevRightGrabPos);
+      world.position.add(delta);
+    }
+    prevRightGrabPos = _rPinch.clone();
+    prevPinchDist    = null;
+    prevHandVec      = null;
+
+  } else {
+    // ── No pinch → reset all ──────────────────────────────────────────────
+    prevPinchDist    = null;
+    prevRightGrabPos = null;
+    prevHandVec      = null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Animation loop
+// ─────────────────────────────────────────────────────────────────────────────
+let t = 0;
+
+renderer.setAnimationLoop((timestamp, frame) => {
+  t += 0.016;
+
+  // Subtle node breathing pulse
+  nodeMeshes.forEach(m => {
+    const s = 1 + Math.sin(t * 1.4 + m.userData.breathOffset) * 0.045;
+    m.scale.setScalar(m === selected ? 1.6 * s : s);
+  });
+
+  // Drifting accent light
+  accentLight.position.set(Math.sin(t * 0.25) * 35, 20, Math.cos(t * 0.25) * 35);
+
+  // VR locomotion
+  locomote();
+
+  // Pinch-to-zoom (hand tracking)
+  handlePinchZoom(frame);
+
+  // Orbit controls only on desktop
+  orbit.enabled = !renderer.xr.isPresenting;
+  if (orbit.enabled) orbit.update();
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

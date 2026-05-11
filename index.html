@@ -55,11 +55,22 @@
       pointer-events:none; text-align:right; line-height:1.8;
     }
 
-    /* VR Button override */
     #VRButton {
       position:fixed !important; bottom:22px !important; left:14px !important;
       transform:none !important;
     }
+    #MRButton {
+      position:fixed; bottom:22px; left:130px;
+      padding:12px 20px;
+      border:1px solid rgba(170,0,255,.6);
+      border-radius:4px;
+      background:rgba(10,5,30,.85);
+      color:#cc88ff;
+      font:13px/1 system-ui,sans-serif;
+      cursor:pointer;
+      display:none;
+    }
+    #MRButton:hover { background:rgba(170,0,255,.2); }
   </style>
 </head>
 <body>
@@ -85,16 +96,20 @@
 
 <div id="hint">
   Desktop: drag · scroll · click node<br>
-  Quest VR: L-stick = move · R-stick Y = fly · Trigger = inspect · Both pinch = zoom · R-pinch = grab
+  Controllers: L-stick=move · R-stick=fly/turn · Trigger=inspect<br>
+  Hands: L-pinch+point=fly · R-fist=up · Both pinch=zoom/rotate<br>
+  Point at node 1s=select · Palm up=menu
 </div>
+
+<button id="MRButton">🥽 Passthrough</button>
 
 <script type="module">
 // ─────────────────────────────────────────────────────────────────────────────
-// Imports  (esm.sh CDN — works on Quest 3 browser)
+// Imports
 // ─────────────────────────────────────────────────────────────────────────────
-import * as THREE          from 'https://esm.sh/three@0.153.0';
-import { VRButton }        from 'https://esm.sh/three@0.153.0/examples/jsm/webxr/VRButton.js';
-import { OrbitControls }   from 'https://esm.sh/three@0.153.0/examples/jsm/controls/OrbitControls.js';
+import * as THREE             from 'https://esm.sh/three@0.153.0';
+import { VRButton }           from 'https://esm.sh/three@0.153.0/examples/jsm/webxr/VRButton.js';
+import { OrbitControls }      from 'https://esm.sh/three@0.153.0/examples/jsm/controls/OrbitControls.js';
 import { XRHandModelFactory } from 'https://esm.sh/three@0.153.0/examples/jsm/webxr/XRHandModelFactory.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,17 +124,18 @@ const prog = (pct, msg) => {
 // Folder → colour
 // ─────────────────────────────────────────────────────────────────────────────
 const PALETTE = {
-  CLUE:     0x00ffff,  // neon cyan
-  HOME:     0x39ff14,  // neon green
-  PHYSICAL: 0xff6600,  // neon orange
-  XVY:      0xff00ff,  // hot magenta
-  ALSTOM:   0x00b4ff,  // electric blue
-  FINANCE:  0xffe600,  // electric yellow
+  CLUE:     0x00ffff,
+  HOME:     0x39ff14,
+  PHYSICAL: 0xff6600,
+  XVY:      0xff00ff,
+  ALSTOM:   0x00b4ff,
+  FINANCE:  0xffe600,
 };
 const folderClr = f => PALETTE[f?.toUpperCase()] ?? 0x889aaa;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Renderer + scene
+// alpha:true enables transparent background needed for AR/passthrough
 // ─────────────────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x020818);
@@ -128,7 +144,7 @@ scene.fog = new THREE.FogExp2(0x020818, 0.005);
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 800);
 camera.position.set(0, 4, 50);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.xr.enabled = true;
@@ -136,6 +152,35 @@ document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer, {
   optionalFeatures: ['hand-tracking', 'local-floor'],
 }));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Passthrough / MR button (desktop entry point for AR mode)
+// ─────────────────────────────────────────────────────────────────────────────
+let isPassthrough = false;
+const mrBtn = document.getElementById('MRButton');
+
+navigator.xr?.isSessionSupported('immersive-ar').then(ok => {
+  if (ok) mrBtn.style.display = 'block';
+});
+
+mrBtn.addEventListener('click', async () => {
+  if (renderer.xr.isPresenting) return;
+  try {
+    const sess = await navigator.xr.requestSession('immersive-ar', {
+      optionalFeatures: ['hand-tracking', 'local-floor'],
+    });
+    await renderer.xr.setSession(sess);
+    scene.background = null;
+    isPassthrough = true;
+  } catch (e) { console.warn('AR session failed:', e); }
+});
+
+renderer.xr.addEventListener('sessionend', () => {
+  if (!isPassthrough) return;
+  scene.background = new THREE.Color(0x020818);
+  isPassthrough = false;
+  MENU_ITEMS[0].label = '🥽 Passthrough';
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lighting
@@ -160,8 +205,7 @@ scene.add(accentLight);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// World group  — all graph content lives here.
-// Moving this group is how VR locomotion works (move world ≡ move player).
+// World group — all graph content; moving it = VR locomotion
 // ─────────────────────────────────────────────────────────────────────────────
 const world = new THREE.Group();
 scene.add(world);
@@ -224,7 +268,6 @@ function forceLayout(nodes, links, steps = 280) {
     const F = {};
     nodes.forEach(n => { F[n.id] = new THREE.Vector3(); });
 
-    // Repulsion (all pairs)
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         tmp.copy(pos[nodes[i].id]).sub(pos[nodes[j].id]);
@@ -235,7 +278,6 @@ function forceLayout(nodes, links, steps = 280) {
       }
     }
 
-    // Attraction (linked pairs)
     links.forEach(l => {
       if (!pos[l.source] || !pos[l.target]) return;
       tmp.copy(pos[l.target]).sub(pos[l.source]);
@@ -245,10 +287,8 @@ function forceLayout(nodes, links, steps = 280) {
       F[l.target].sub(tmp);
     });
 
-    // Centre gravity
     nodes.forEach(n => { F[n.id].addScaledVector(pos[n.id], -0.007); });
 
-    // Integrate
     nodes.forEach(n => {
       vel[n.id].add(F[n.id]).multiplyScalar(0.83);
       pos[n.id].add(vel[n.id]);
@@ -265,7 +305,6 @@ const { nodes, links } = await fetch('graph.json').then(r => r.json());
 
 prog(30, `${nodes.length} pages · ${links.length} links — computing layout…`);
 
-// Node degree (for sizing)
 const deg = {};
 nodes.forEach(n => { deg[n.id] = 0; });
 links.forEach(l => {
@@ -273,12 +312,10 @@ links.forEach(l => {
   deg[l.target] = (deg[l.target] || 0) + 1;
 });
 
-// Run layout
 const positions = forceLayout(nodes, links);
 
 prog(65, 'Building 3D graph…');
 
-// Material cache (shared per colour)
 const matCache = {};
 function getMat(col) {
   if (!matCache[col]) {
@@ -290,7 +327,6 @@ function getMat(col) {
   return matCache[col];
 }
 
-// Build node meshes + labels
 const nodeMeshes = [];
 
 nodes.forEach((node, idx) => {
@@ -312,7 +348,6 @@ nodes.forEach((node, idx) => {
   world.add(label);
 });
 
-// Build edges
 {
   const verts = [];
   links.forEach(l => {
@@ -327,7 +362,6 @@ nodes.forEach((node, idx) => {
   })));
 }
 
-// Legend
 {
   const el = document.getElementById('legend');
   const folders = [...new Set(nodes.map(n => n.folder))].sort();
@@ -390,12 +424,23 @@ function clearPick() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VR controllers
+// VR Controllers (gamepad fallback + trigger select)
 // ─────────────────────────────────────────────────────────────────────────────
 const ctrl0 = renderer.xr.getController(0);
 const ctrl1 = renderer.xr.getController(1);
 scene.add(ctrl0);
 scene.add(ctrl1);
+
+[ctrl0, ctrl1].forEach(c => {
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -15),
+  ]);
+  c.add(new THREE.Line(geo, new THREE.LineBasicMaterial({
+    color: 0x00e5ff, transparent: true, opacity: 0.45,
+  })));
+  c.addEventListener('selectstart', () => vrSelectFromCtrl(c));
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hand models
@@ -408,33 +453,14 @@ hand1.add(handFactory.createHandModel(hand1, 'spheres'));
 scene.add(hand0);
 scene.add(hand1);
 
-// Controller ray lines
-[ctrl0, ctrl1].forEach(c => {
-  const geo = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(0, 0, 0),
-    new THREE.Vector3(0, 0, -15),
-  ]);
-  c.add(new THREE.Line(geo, new THREE.LineBasicMaterial({
-    color: 0x00e5ff, transparent: true, opacity: 0.45,
-  })));
-  c.addEventListener('selectstart', () => vrSelect(c));
-});
-
-// VR select — show floating info panel
-const rayMat = new THREE.Matrix4();
+// ─────────────────────────────────────────────────────────────────────────────
+// VR floating info panel (shared by controller trigger + hand dwell)
+// ─────────────────────────────────────────────────────────────────────────────
 let vrPanel = null;
 
-function vrSelect(ctrl) {
-  rayMat.identity().extractRotation(ctrl.matrixWorld);
-  raycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
-  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(rayMat);
-  const hits = raycaster.intersectObjects(nodeMeshes);
-  if (!hits.length) return;
+function showVrPanel(nd, worldPos) {
+  if (vrPanel) { scene.remove(vrPanel); vrPanel = null; }
 
-  const nd = hits[0].object.userData.node;
-  if (vrPanel) scene.remove(vrPanel);
-
-  // Draw panel on canvas
   const cv = document.createElement('canvas');
   cv.width = 512; cv.height = 130;
   const cx = cv.getContext('2d');
@@ -456,26 +482,276 @@ function vrSelect(ctrl) {
     new THREE.PlaneGeometry(4.5, 1.15),
     new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide })
   );
-  vrPanel.position.copy(hits[0].point);
+  vrPanel.position.copy(worldPos);
   vrPanel.position.y += 1.9;
   vrPanel.quaternion.copy(camera.quaternion);
   scene.add(vrPanel);
-  setTimeout(() => { if (vrPanel) { scene.remove(vrPanel); vrPanel = null; } }, 5000);
+  setTimeout(() => { if (vrPanel) { scene.remove(vrPanel); vrPanel = null; } }, 6000);
+}
+
+const _rayMat = new THREE.Matrix4();
+function vrSelectFromCtrl(ctrl) {
+  _rayMat.identity().extractRotation(ctrl.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(_rayMat);
+  const hits = raycaster.intersectObjects(nodeMeshes);
+  if (hits.length) showVrPanel(hits[0].object.userData.node, hits[0].point);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VR locomotion  (world moves, player stays — equivalent to flying through graph)
-// Left stick  → move forward/back/strafe
-// Right stick Y → fly up/down
-// Right stick X → rotate (turn-in-place)
+// Gesture state — populated each frame by detectGestures()
+// ─────────────────────────────────────────────────────────────────────────────
+const gs = {
+  left: {
+    pinching: false, pointing: false, fist: false, palmUp: false,
+    pinchPos: new THREE.Vector3(),
+    indexTip: new THREE.Vector3(),
+    wrist:    new THREE.Vector3(),
+    indexDir: new THREE.Vector3(),
+  },
+  right: {
+    pinching: false, pointing: false, fist: false, palmUp: false,
+    pinchPos: new THREE.Vector3(),
+    indexTip: new THREE.Vector3(),
+    wrist:    new THREE.Vector3(),
+    indexDir: new THREE.Vector3(),
+  },
+};
+
+function getJointPos(frame, src, name, ref) {
+  const joint = src.hand?.get(name);
+  if (!joint) return null;
+  const pose = frame.getJointPose(joint, ref);
+  if (!pose) return null;
+  const p = pose.transform.position;
+  return new THREE.Vector3(p.x, p.y, p.z);
+}
+
+const PINCH_ENTER = 0.025;
+const PINCH_EXIT  = 0.05;
+
+function detectGestures(frame) {
+  if (!frame) return;
+  const sess = renderer.xr.getSession();
+  if (!sess) return;
+  const ref = renderer.xr.getReferenceSpace();
+  if (!ref) return;
+
+  for (const src of sess.inputSources) {
+    if (!src.hand) continue;
+    const g = gs[src.handedness];
+    if (!g) continue;
+
+    const thumbTip  = getJointPos(frame, src, 'thumb-tip', ref);
+    const indexTip  = getJointPos(frame, src, 'index-finger-tip', ref);
+    const middleTip = getJointPos(frame, src, 'middle-finger-tip', ref);
+    const ringTip   = getJointPos(frame, src, 'ring-finger-tip', ref);
+    const wristPos  = getJointPos(frame, src, 'wrist', ref);
+    if (!thumbTip || !indexTip || !middleTip || !wristPos) continue;
+
+    g.indexTip.copy(indexTip);
+    g.wrist.copy(wristPos);
+    g.indexDir.copy(indexTip).sub(wristPos).normalize();
+
+    // Pinch with hysteresis
+    const pinchDist = thumbTip.distanceTo(indexTip);
+    g.pinching = g.pinching ? pinchDist < PINCH_EXIT : pinchDist < PINCH_ENTER;
+    if (g.pinching) g.pinchPos.addVectors(thumbTip, indexTip).multiplyScalar(0.5);
+
+    // Point: index extended, middle + ring curled
+    const indexLen  = wristPos.distanceTo(indexTip);
+    const middleLen = wristPos.distanceTo(middleTip);
+    const ringLen   = ringTip ? wristPos.distanceTo(ringTip) : 0;
+    g.pointing = !g.pinching && indexLen > 0.13 && middleLen < 0.11 && (!ringTip || ringLen < 0.11);
+
+    // Fist: all fingertips close to wrist, not pinching
+    g.fist = !g.pinching && indexLen < 0.09 && middleLen < 0.09;
+
+    // Palm up: wrist Y axis pointing upward in world space
+    const wristJoint = src.hand.get('wrist');
+    if (wristJoint) {
+      const wp = frame.getJointPose(wristJoint, ref);
+      if (wp) {
+        const q = wp.transform.orientation;
+        const palmNorm = new THREE.Vector3(0, 1, 0)
+          .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w));
+        g.palmUp = palmNorm.y > 0.55;
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pinch indicator dots — small sphere at thumb/index midpoint
+// ─────────────────────────────────────────────────────────────────────────────
+function makeDot(color) {
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(0.013, 8, 6),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 })
+  );
+  m.visible = false;
+  scene.add(m);
+  return m;
+}
+const leftDot  = makeDot(0x00e5ff);
+const rightDot = makeDot(0xaa00ff);
+
+function updatePinchDots() {
+  leftDot.visible  = gs.left.pinching;
+  rightDot.visible = gs.right.pinching;
+  if (gs.left.pinching)  leftDot.position.copy(gs.left.pinchPos);
+  if (gs.right.pinching) rightDot.position.copy(gs.right.pinchPos);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hand point rays + hover highlight
+// ─────────────────────────────────────────────────────────────────────────────
+function makeRay(color) {
+  const pts = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -25)];
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 })
+  );
+  line.visible = false;
+  scene.add(line);
+  return line;
+}
+const leftRay  = makeRay(0x00e5ff);
+const rightRay = makeRay(0xaa00ff);
+
+const hoverDot = new THREE.Mesh(
+  new THREE.SphereGeometry(0.025, 8, 6),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 })
+);
+hoverDot.visible = false;
+scene.add(hoverDot);
+
+let hoveredMesh = null;
+
+function setHover(mesh) {
+  if (hoveredMesh && hoveredMesh !== selected) hoveredMesh.material.emissiveIntensity = 0.45;
+  hoveredMesh = mesh;
+  if (hoveredMesh && hoveredMesh !== selected) hoveredMesh.material.emissiveIntensity = 0.9;
+}
+
+function updateHandRays() {
+  if (!renderer.xr.isPresenting) {
+    leftRay.visible = rightRay.visible = hoverDot.visible = false;
+    return;
+  }
+
+  const rg = gs.right, lg = gs.left;
+
+  // Right ray (priority for selection)
+  rightRay.visible = rg.pointing;
+  if (rg.pointing) {
+    rightRay.position.copy(rg.indexTip);
+    rightRay.lookAt(rg.indexTip.clone().addScaledVector(rg.indexDir, 1));
+  }
+
+  // Left ray only when right isn't pointing
+  leftRay.visible = lg.pointing && !rg.pointing;
+  if (leftRay.visible) {
+    leftRay.position.copy(lg.indexTip);
+    leftRay.lookAt(lg.indexTip.clone().addScaledVector(lg.indexDir, 1));
+  }
+
+  // Raycast from active pointing hand
+  const activeG = rg.pointing ? rg : (lg.pointing ? lg : null);
+  if (activeG) {
+    raycaster.ray.origin.copy(activeG.indexTip);
+    raycaster.ray.direction.copy(activeG.indexDir);
+    // Skip menu meshes — only hit graph nodes
+    const hits = raycaster.intersectObjects(nodeMeshes);
+    if (hits.length) {
+      hoverDot.visible = true;
+      hoverDot.position.copy(hits[0].point);
+      setHover(hits[0].object);
+    } else {
+      hoverDot.visible = false;
+      setHover(null);
+    }
+  } else {
+    hoverDot.visible = false;
+    setHover(null);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dwell selection — point at node for DWELL_TIME ms → auto-select
+// Progress shown via canvas arc drawn on a plane billboard
+// ─────────────────────────────────────────────────────────────────────────────
+const DWELL_TIME = 1000;
+let dwellMesh  = null;
+let dwellStart = 0;
+let dwellCooldownUntil = 0;
+
+const dwellCanvas = document.createElement('canvas');
+dwellCanvas.width = dwellCanvas.height = 128;
+const dwellCtx = dwellCanvas.getContext('2d');
+const dwellTex = new THREE.CanvasTexture(dwellCanvas);
+
+const dwellRing = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.22, 0.22),
+  new THREE.MeshBasicMaterial({ map: dwellTex, transparent: true, side: THREE.DoubleSide, depthWrite: false })
+);
+dwellRing.visible = false;
+scene.add(dwellRing);
+
+function drawDwellArc(progress) {
+  dwellCtx.clearRect(0, 0, 128, 128);
+  dwellCtx.beginPath();
+  dwellCtx.arc(64, 64, 50, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+  dwellCtx.strokeStyle = '#00e5ff';
+  dwellCtx.lineWidth = 12;
+  dwellCtx.stroke();
+  dwellTex.needsUpdate = true;
+}
+
+function updateDwell() {
+  const now = performance.now();
+  if (!renderer.xr.isPresenting || now < dwellCooldownUntil) {
+    dwellRing.visible = false;
+    return;
+  }
+
+  const activeG = gs.right.pointing ? gs.right : (gs.left.pointing ? gs.left : null);
+  if (!activeG || !hoverDot.visible || !hoveredMesh) {
+    dwellRing.visible = false;
+    dwellMesh = null;
+    return;
+  }
+
+  if (hoveredMesh !== dwellMesh) {
+    dwellMesh  = hoveredMesh;
+    dwellStart = now;
+  }
+
+  const progress = Math.min((now - dwellStart) / DWELL_TIME, 1);
+  dwellRing.visible = true;
+  dwellRing.position.copy(hoverDot.position);
+  dwellRing.quaternion.copy(camera.quaternion);
+  drawDwellArc(progress);
+
+  if (progress >= 1) {
+    showVrPanel(dwellMesh.userData.node, dwellMesh.position);
+    dwellMesh = null;
+    dwellCooldownUntil = now + 2000;
+    dwellRing.visible = false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gamepad locomotion (controllers only — skips when hand tracking active)
 // ─────────────────────────────────────────────────────────────────────────────
 const _fwd = new THREE.Vector3();
 const _rgt = new THREE.Vector3();
 const _up  = new THREE.Vector3(0, 1, 0);
 
-function locomote() {
+function gamepadLocomote() {
   const sess = renderer.xr.getSession();
   if (!sess) return;
+  for (const src of sess.inputSources) if (src.hand) return; // hand mode active
 
   const xrCam = renderer.xr.getCamera(camera);
   const speed = 0.1;
@@ -483,27 +759,21 @@ function locomote() {
   for (const src of sess.inputSources) {
     if (!src.gamepad) continue;
     const ax = src.gamepad.axes;
-    const lx = ax[2] ?? 0;  // thumbstick X
-    const ly = ax[3] ?? 0;  // thumbstick Y
+    const lx = ax[2] ?? 0;
+    const ly = ax[3] ?? 0;
 
     if (src.handedness === 'left') {
-      // Forward / strafe
       if (Math.abs(lx) > 0.12 || Math.abs(ly) > 0.12) {
         xrCam.getWorldDirection(_fwd);
         _fwd.y = 0;
         if (_fwd.lengthSq() < 0.001) _fwd.set(0, 0, -1);
         _fwd.normalize();
         _rgt.crossVectors(_fwd, _up).normalize();
-        // Move world opposite direction = player moves forward
         world.position.addScaledVector(_fwd,  ly * speed);
         world.position.addScaledVector(_rgt, -lx * speed);
       }
     } else {
-      // Vertical fly
-      if (Math.abs(ly) > 0.12) {
-        world.position.y += ly * speed;
-      }
-      // Snap / smooth turn — rotate world around HMD position
+      if (Math.abs(ly) > 0.12) world.position.y += ly * speed;
       if (Math.abs(lx) > 0.12) {
         const camWP = new THREE.Vector3();
         xrCam.getWorldPosition(camWP);
@@ -517,6 +787,236 @@ function locomote() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Hand locomotion (hand tracking only)
+// Left pinch + point direction → fly
+// Right fist → fly up   Left fist → fly down
+// ─────────────────────────────────────────────────────────────────────────────
+function handLocomote() {
+  if (!renderer.xr.isPresenting) return;
+  const sess = renderer.xr.getSession();
+  if (!sess) return;
+  let hasHands = false;
+  for (const src of sess.inputSources) if (src.hand) { hasHands = true; break; }
+  if (!hasHands) return;
+
+  const speed = 0.08;
+  const bothPinching = gs.left.pinching && gs.right.pinching;
+
+  // Left pinch alone (not zoom) → fly in direction index finger points
+  if (gs.left.pinching && !bothPinching) {
+    world.position.addScaledVector(gs.left.indexDir, speed);
+  }
+
+  // Fist gestures for vertical movement
+  if (gs.right.fist) world.position.y += speed * 0.6;
+  if (gs.left.fist)  world.position.y -= speed * 0.6;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two-hand pinch → zoom + rotate   Right pinch alone → grab world
+// ─────────────────────────────────────────────────────────────────────────────
+let prevPinchDist    = null;
+let prevRightGrabPos = null;
+let prevHandVec      = null;
+const _lPinch  = new THREE.Vector3();
+const _rPinch  = new THREE.Vector3();
+const _handVec = new THREE.Vector3();
+const _dq      = new THREE.Quaternion();
+
+function handlePinchZoom() {
+  const lp = gs.left.pinching;
+  const rp = gs.right.pinching;
+  if (lp) _lPinch.copy(gs.left.pinchPos);
+  if (rp) _rPinch.copy(gs.right.pinchPos);
+
+  if (lp && rp) {
+    const d   = _lPinch.distanceTo(_rPinch);
+    const mid = new THREE.Vector3().addVectors(_lPinch, _rPinch).multiplyScalar(0.5);
+    _handVec.copy(_rPinch).sub(_lPinch).normalize();
+
+    if (prevPinchDist !== null && d > 0.01) {
+      const next = world.scale.x * (d / prevPinchDist);
+      if (next > 0.01 && next < 6) world.scale.setScalar(next);
+
+      if (prevHandVec !== null) {
+        const dot = _handVec.dot(prevHandVec);
+        if (dot < 0.9998 && dot > -0.9998) {
+          _dq.setFromUnitVectors(prevHandVec, _handVec);
+          world.position.sub(mid);
+          world.position.applyQuaternion(_dq);
+          world.quaternion.premultiply(_dq);
+          world.position.add(mid);
+        }
+      }
+    }
+    prevPinchDist = d;
+    prevHandVec   = _handVec.clone();
+    prevRightGrabPos = null;
+
+  } else if (rp && !lp && !menuVisible) {
+    // Right pinch alone: grab and reposition (skip when menu is open)
+    if (prevRightGrabPos !== null) {
+      world.position.add(_rPinch.clone().sub(prevRightGrabPos));
+    }
+    prevRightGrabPos = _rPinch.clone();
+    prevPinchDist    = null;
+    prevHandVec      = null;
+
+  } else {
+    prevPinchDist    = null;
+    prevRightGrabPos = null;
+    prevHandVec      = null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wrist radial menu
+// Opens when left palm faces up for >600ms
+// Right-hand ray hovers + right pinch selects
+// Items: Passthrough toggle, Reset view
+// ─────────────────────────────────────────────────────────────────────────────
+const MENU_ITEMS = [
+  { label: '🥽 Passthrough', color: '#aa00ff' },
+  { label: '🔄 Reset View',  color: '#00e5ff' },
+];
+
+let menuVisible     = false;
+let menuPalmUpSince = 0;
+let menuHovered     = -1;
+let prevRightPinching = false;
+const MENU_OPEN_DELAY = 600;
+
+const menuGroup = new THREE.Group();
+scene.add(menuGroup);
+menuGroup.visible = false;
+
+function buildMenuTex(label, color, highlighted) {
+  const cv = document.createElement('canvas');
+  cv.width = 400; cv.height = 100;
+  const cx = cv.getContext('2d');
+  cx.fillStyle = highlighted ? 'rgba(40,10,70,.98)' : 'rgba(5,8,28,.93)';
+  cx.fillRect(0, 0, 400, 100);
+  cx.strokeStyle = color;
+  cx.lineWidth = highlighted ? 4 : 2;
+  cx.strokeRect(2, 2, 396, 96);
+  cx.fillStyle = color;
+  cx.font = 'bold 36px Arial';
+  cx.textAlign = 'center';
+  cx.textBaseline = 'middle';
+  cx.fillText(label, 200, 50);
+  return new THREE.CanvasTexture(cv);
+}
+
+const menuMeshes = MENU_ITEMS.map((item, i) => {
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.34, 0.085),
+    new THREE.MeshBasicMaterial({ map: buildMenuTex(item.label, item.color, false), transparent: true, side: THREE.DoubleSide })
+  );
+  mesh.userData.menuIndex = i;
+  menuGroup.add(mesh);
+  return mesh;
+});
+
+function refreshMenuTex(idx, highlighted) {
+  const item = MENU_ITEMS[idx];
+  menuMeshes[idx].material.map.dispose();
+  menuMeshes[idx].material.map = buildMenuTex(item.label, item.color, highlighted);
+  menuMeshes[idx].material.needsUpdate = true;
+}
+
+function updateMenu() {
+  const palmUp = gs.left.palmUp;
+  const now    = performance.now();
+  const rightPinchStarted = gs.right.pinching && !prevRightPinching;
+
+  if (palmUp) {
+    if (!menuPalmUpSince) menuPalmUpSince = now;
+    if (!menuVisible && now - menuPalmUpSince > MENU_OPEN_DELAY) {
+      menuVisible = true;
+      menuGroup.visible = true;
+    }
+  } else {
+    menuPalmUpSince = 0;
+    if (menuVisible) {
+      menuVisible = false;
+      menuGroup.visible = false;
+      menuHovered = -1;
+    }
+  }
+
+  if (menuVisible) {
+    // Float menu above left wrist
+    const wristPos = gs.left.wrist;
+    if (wristPos.lengthSq() > 0.0001) {
+      menuGroup.position.copy(wristPos).addScaledVector(_up, 0.16);
+      menuGroup.quaternion.copy(camera.quaternion);
+      MENU_ITEMS.forEach((_, i) => {
+        menuMeshes[i].position.set(0, (MENU_ITEMS.length / 2 - i - 0.5) * 0.1, 0);
+      });
+    }
+
+    // Hover detection via right-hand ray
+    let newHover = -1;
+    if (gs.right.pointing) {
+      raycaster.ray.origin.copy(gs.right.indexTip);
+      raycaster.ray.direction.copy(gs.right.indexDir);
+      const hits = raycaster.intersectObjects(menuMeshes);
+      if (hits.length) newHover = hits[0].object.userData.menuIndex;
+    }
+
+    if (newHover !== menuHovered) {
+      if (menuHovered >= 0) refreshMenuTex(menuHovered, false);
+      menuHovered = newHover;
+      if (menuHovered >= 0) refreshMenuTex(menuHovered, true);
+    }
+
+    // Pinch-start while hovering → execute
+    if (rightPinchStarted && menuHovered >= 0) {
+      executeMenuItem(menuHovered);
+      menuVisible = false;
+      menuGroup.visible = false;
+      menuPalmUpSince = 0;
+      menuHovered = -1;
+    }
+  }
+
+  prevRightPinching = gs.right.pinching;
+}
+
+function executeMenuItem(idx) {
+  if (idx === 0) togglePassthrough();
+  if (idx === 1) { world.position.set(0, 0, 0); world.rotation.set(0, 0, 0); world.scale.setScalar(1); }
+}
+
+async function togglePassthrough() {
+  if (!renderer.xr.isPresenting) return;
+  const currentSession = renderer.xr.getSession();
+  if (!currentSession) return;
+
+  const nextMode = isPassthrough ? 'immersive-vr' : 'immersive-ar';
+  try {
+    const supported = await navigator.xr.isSessionSupported(nextMode);
+    if (!supported) return;
+
+    await new Promise(resolve => {
+      renderer.xr.addEventListener('sessionend', resolve, { once: true });
+      currentSession.end();
+    });
+
+    const newSession = await navigator.xr.requestSession(nextMode, {
+      optionalFeatures: ['hand-tracking', 'local-floor'],
+    });
+    await renderer.xr.setSession(newSession);
+
+    isPassthrough = !isPassthrough;
+    scene.background = isPassthrough ? null : new THREE.Color(0x020818);
+    MENU_ITEMS[0].label = isPassthrough ? '🌑 Opaque' : '🥽 Passthrough';
+  } catch (e) {
+    console.warn('Passthrough toggle failed:', e);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Resize
 // ─────────────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
@@ -526,111 +1026,6 @@ window.addEventListener('resize', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Two-hand pinch → zoom + rotate  |  Right-hand pinch alone → grab
-// ─────────────────────────────────────────────────────────────────────────────
-let prevPinchDist    = null;
-let prevRightGrabPos = null;
-let prevHandVec      = null;
-const _lPinch    = new THREE.Vector3();
-const _rPinch    = new THREE.Vector3();
-const _handVec   = new THREE.Vector3();
-const _deltaQuat = new THREE.Quaternion();
-
-// Hysteresis: tighter threshold to START pinching, looser to RELEASE
-// Prevents accidental triggers and flickering
-const PINCH_ENTER = 0.025; // 2.5 cm — must close this far to begin
-const PINCH_EXIT  = 0.05;  // 5.0 cm — must open this far to end
-let leftWasPinching  = false;
-let rightWasPinching = false;
-
-function handlePinchZoom(frame) {
-  if (!frame) return;
-  const sess = renderer.xr.getSession();
-  if (!sess) return;
-  const refSpace = renderer.xr.getReferenceSpace();
-  if (!refSpace) return;
-
-  let leftPinching = false, rightPinching = false;
-
-  for (const src of sess.inputSources) {
-    if (!src.hand) continue;
-    const thumbTip = src.hand.get('thumb-tip');
-    const indexTip = src.hand.get('index-finger-tip');
-    if (!thumbTip || !indexTip) continue;
-    const tPose = frame.getJointPose(thumbTip, refSpace);
-    const iPose = frame.getJointPose(indexTip, refSpace);
-    if (!tPose || !iPose) continue;
-
-    const tp = tPose.transform.position;
-    const ip = iPose.transform.position;
-    const dist = Math.hypot(tp.x - ip.x, tp.y - ip.y, tp.z - ip.z);
-
-    // Hysteresis: use different thresholds to enter vs exit pinch state
-    const wasP = src.handedness === 'left' ? leftWasPinching : rightWasPinching;
-    const pinching = wasP ? dist < PINCH_EXIT : dist < PINCH_ENTER;
-    if (src.handedness === 'left')  leftWasPinching  = pinching;
-    else                            rightWasPinching = pinching;
-
-    const mid = new THREE.Vector3(
-      (tp.x + ip.x) / 2,
-      (tp.y + ip.y) / 2,
-      (tp.z + ip.z) / 2
-    );
-    if (src.handedness === 'left')  { leftPinching  = pinching; _lPinch.copy(mid); }
-    else                            { rightPinching = pinching; _rPinch.copy(mid); }
-  }
-
-  if (leftPinching && rightPinching) {
-    // ── Two-hand pinch → zoom + rotate ────────────────────────────────────
-    const d = _lPinch.distanceTo(_rPinch);
-    // Midpoint of both pinches — pivot for rotation
-    const mid = new THREE.Vector3().addVectors(_lPinch, _rPinch).multiplyScalar(0.5);
-    // Unit vector from left pinch to right pinch — encodes orientation
-    _handVec.copy(_rPinch).sub(_lPinch).normalize();
-
-    if (prevPinchDist !== null && d > 0.01) {
-      // Zoom
-      const factor = d / prevPinchDist;
-      const next = world.scale.x * factor;
-      if (next > 0.01 && next < 6) world.scale.setScalar(next);
-
-      // Rotate — only when orientation changed meaningfully
-      if (prevHandVec !== null) {
-        const dot = _handVec.dot(prevHandVec);
-        if (dot < 0.9998 && dot > -0.9998) {
-          _deltaQuat.setFromUnitVectors(prevHandVec, _handVec);
-          // Rotate world around the midpoint of both hands
-          world.position.sub(mid);
-          world.position.applyQuaternion(_deltaQuat);
-          world.quaternion.premultiply(_deltaQuat);
-          world.position.add(mid);
-        }
-      }
-    }
-
-    prevPinchDist = d;
-    prevHandVec   = _handVec.clone();
-    prevRightGrabPos = null;
-
-  } else if (rightPinching && !leftPinching) {
-    // ── Right-hand pinch alone → grab & reposition ────────────────────────
-    if (prevRightGrabPos !== null) {
-      const delta = _rPinch.clone().sub(prevRightGrabPos);
-      world.position.add(delta);
-    }
-    prevRightGrabPos = _rPinch.clone();
-    prevPinchDist    = null;
-    prevHandVec      = null;
-
-  } else {
-    // ── No pinch → reset all ──────────────────────────────────────────────
-    prevPinchDist    = null;
-    prevRightGrabPos = null;
-    prevHandVec      = null;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Animation loop
 // ─────────────────────────────────────────────────────────────────────────────
 let t = 0;
@@ -638,22 +1033,24 @@ let t = 0;
 renderer.setAnimationLoop((timestamp, frame) => {
   t += 0.016;
 
-  // Subtle node breathing pulse
   nodeMeshes.forEach(m => {
     const s = 1 + Math.sin(t * 1.4 + m.userData.breathOffset) * 0.045;
     m.scale.setScalar(m === selected ? 1.6 * s : s);
   });
 
-  // Drifting accent light
   accentLight.position.set(Math.sin(t * 0.25) * 35, 20, Math.cos(t * 0.25) * 35);
 
-  // VR locomotion
-  locomote();
+  if (renderer.xr.isPresenting) {
+    detectGestures(frame);   // must be first — all others read gs
+    updatePinchDots();
+    updateHandRays();
+    updateDwell();
+    gamepadLocomote();
+    handLocomote();
+    handlePinchZoom();
+    updateMenu();
+  }
 
-  // Pinch-to-zoom (hand tracking)
-  handlePinchZoom(frame);
-
-  // Orbit controls only on desktop
   orbit.enabled = !renderer.xr.isPresenting;
   if (orbit.enabled) orbit.update();
 

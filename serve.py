@@ -7,7 +7,7 @@ Usage:
     python3 serve.py [--vault /path/to/vault] [--ngrok]
 """
 
-import http.server, ssl, socket, subprocess, os, sys, re, json
+import http.server, ssl, socket, subprocess, os, sys, re, json, socketserver
 import threading, time, hashlib, argparse, queue
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -18,6 +18,13 @@ CYAN  = '\033[96m'
 BOLD  = '\033[1m'
 RESET = '\033[0m'
 DIM   = '\033[2m'
+
+# ── Fast server (skip socket.getfqdn to avoid DNS hang under launchd) ────────
+class FastHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = '0.0.0.0'
+        self.server_port = self.server_address[1]
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
@@ -59,17 +66,20 @@ def local_ip():
 
 # ── Self-signed cert ──────────────────────────────────────────────────────────
 def ensure_cert(ip):
-    import tempfile
-    cert = os.path.join(tempfile.gettempdir(), f'vrbrain_{ip.replace(".","_")}.crt')
-    key  = os.path.join(tempfile.gettempdir(), f'vrbrain_{ip.replace(".","_")}.key')
+    # Store cert alongside the script so it persists and is reused across reboots.
+    # Use EC P-256 (instant generation, no entropy starvation under launchd).
+    cert = os.path.join(DIR, 'server.crt')
+    key  = os.path.join(DIR, 'server.key')
     if not os.path.exists(cert):
-        print(f'{DIM}Generating self-signed certificate for {ip}…{RESET}')
+        print(f'{DIM}Generating self-signed certificate…{RESET}')
         subprocess.run([
-            'openssl', 'req', '-x509', '-nodes', '-days', '365',
-            '-newkey', 'rsa:2048', '-keyout', key, '-out', cert,
-            '-subj', f'/CN={ip}',
-            '-addext', f'subjectAltName=IP:{ip},IP:127.0.0.1',
+            'openssl', 'req', '-x509', '-nodes', '-days', '3650',
+            '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
+            '-keyout', key, '-out', cert,
+            '-subj', '/CN=vr-obsidian',
+            '-addext', f'subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost',
         ], check=True, capture_output=True)
+        print(f'{DIM}Certificate ready.{RESET}')
     return cert, key
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -232,7 +242,7 @@ def main():
     build_graph()
     cert, key = ensure_cert(ip)
 
-    server = http.server.ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
+    server = FastHTTPServer(('0.0.0.0', PORT), Handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)

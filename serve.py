@@ -221,7 +221,7 @@ def launch_ngrok():
         return
     print(f'  Starting ngrok tunnel…')
     proc = subprocess.Popen(
-        [ngrok_bin, 'http', f'https://localhost:{PORT}', '--log=stdout'],
+        [ngrok_bin, 'http', '8000', '--log=stdout'],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
     )
     # Wait for tunnel URL
@@ -269,10 +269,16 @@ def main():
     print(f'  {DIM}Press Ctrl+C to stop{RESET}')
     print()
 
+    # Plain HTTP on 8000 for ngrok tunnelling (ngrok provides its own TLS)
+    http_server = socketserver.ThreadingTCPServer(('0.0.0.0', 8000), Handler)
+    http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+    http_thread.start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print(f'\n  {DIM}Server stopped.{RESET}\n')
+        http_server.shutdown()
 
 if __name__ == '__main__':
     main()

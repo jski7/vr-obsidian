@@ -105,9 +105,50 @@
       position:fixed !important; bottom:22px !important; left:14px !important;
       transform:none !important;
     }
+
+    /* ── Password gate ── */
+    #pw-gate {
+      position:fixed; inset:0; z-index:999;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      background:#020818;
+    }
+    #pw-gate h2 {
+      font-size:2rem; font-weight:900; letter-spacing:.08em;
+      background:linear-gradient(135deg,#00e5ff,#aa00ff);
+      -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+      background-clip:text; margin-bottom:2rem;
+    }
+    #pw-wrap {
+      display:flex; gap:10px; align-items:center;
+    }
+    #pw-input {
+      background:rgba(255,255,255,.06); border:1px solid rgba(0,229,255,.3);
+      color:#fff; font-size:1.5rem; text-align:center; letter-spacing:.4em;
+      padding:.5rem 1.2rem; border-radius:10px; outline:none; width:160px;
+      transition:border-color .2s;
+    }
+    #pw-input:focus { border-color:#00e5ff; }
+    #pw-btn {
+      background:linear-gradient(135deg,#00e5ff22,#aa00ff22);
+      border:1px solid rgba(0,229,255,.4); color:#00e5ff;
+      font-size:1rem; font-weight:700; padding:.55rem 1.3rem;
+      border-radius:10px; cursor:pointer; transition:all .2s;
+    }
+    #pw-btn:hover { background:rgba(0,229,255,.15); }
+    #pw-err { color:#ff4466; font-size:.85rem; margin-top:.9rem; min-height:1.2em; }
   </style>
 </head>
 <body>
+
+<div id="pw-gate">
+  <h2>🧠 VR BRAIN</h2>
+  <div id="pw-wrap">
+    <input id="pw-input" type="password" placeholder="••••" maxlength="20" autofocus />
+    <button id="pw-btn">Enter</button>
+  </div>
+  <div id="pw-err"></div>
+</div>
+
 
 <div id="overlay">
   <h1>🧠 VR BRAIN</h1>
@@ -142,6 +183,32 @@
   <div id="note-body"></div>
 </div>
 
+
+<script>
+(function() {
+  const PASS = '9';
+  const gate = document.getElementById('pw-gate');
+  const input = document.getElementById('pw-input');
+  const btn   = document.getElementById('pw-btn');
+  const err   = document.getElementById('pw-err');
+
+  function attempt() {
+    if (input.value === PASS) {
+      gate.style.transition = 'opacity .6s';
+      gate.style.opacity = '0';
+      setTimeout(() => gate.remove(), 650);
+    } else {
+      err.textContent = 'Incorrect password';
+      input.value = '';
+      input.focus();
+      setTimeout(() => { err.textContent = ''; }, 2000);
+    }
+  }
+
+  btn.addEventListener('click', attempt);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') attempt(); });
+})();
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
 <script type="module">
 // ─────────────────────────────────────────────────────────────────────────────

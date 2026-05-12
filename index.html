@@ -55,6 +55,51 @@
       pointer-events:none; text-align:right; line-height:1.8;
     }
 
+    /* ── Note content panel ── */
+    #note-panel {
+      position:fixed; bottom:0; left:0; right:0;
+      height:42vh; background:rgba(2,8,24,.97);
+      border-top:1px solid rgba(0,229,255,.25);
+      transform:translateY(100%);
+      transition:transform .35s cubic-bezier(.4,0,.2,1);
+      z-index:50; display:flex; flex-direction:column;
+      box-shadow:0 -8px 40px rgba(0,0,0,.6);
+    }
+    #note-panel.open { transform:translateY(0); }
+    #note-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:10px 18px 8px; border-bottom:1px solid rgba(0,229,255,.1);
+      flex-shrink:0;
+    }
+    #note-title { font-size:1rem; font-weight:700; color:#00e5ff; }
+    #note-close {
+      cursor:pointer; color:rgba(255,255,255,.4); font-size:1.3rem;
+      line-height:1; border:none; background:none; padding:4px 8px;
+      transition:color .2s;
+    }
+    #note-close:hover { color:#fff; }
+    #note-body {
+      overflow-y:auto; padding:14px 18px 18px;
+      font-size:.82rem; line-height:1.7; color:rgba(255,255,255,.75);
+      flex:1;
+    }
+    #note-body h1,#note-body h2,#note-body h3 {
+      color:#00e5ff; margin:.8em 0 .3em; font-size:.95rem;
+    }
+    #note-body h1 { font-size:1.1rem; }
+    #note-body code {
+      background:rgba(0,229,255,.08); border-radius:4px;
+      padding:1px 5px; font-size:.8rem; color:#88ddff;
+    }
+    #note-body pre { background:rgba(0,0,0,.4); border-radius:6px; padding:10px 14px; overflow-x:auto; margin:.5em 0; }
+    #note-body pre code { background:none; padding:0; }
+    #note-body a { color:#aa88ff; }
+    #note-body strong { color:#fff; }
+    #note-body em { color:rgba(255,255,255,.6); }
+    #note-body ul,#note-body ol { padding-left:1.4em; }
+    #note-body blockquote { border-left:3px solid rgba(0,229,255,.3); padding-left:10px; color:rgba(255,255,255,.5); }
+    #note-body hr { border:none; border-top:1px solid rgba(255,255,255,.1); margin:.8em 0; }
+
     /* VR Button override */
     #VRButton {
       position:fixed !important; bottom:22px !important; left:14px !important;
@@ -84,13 +129,23 @@
 </div>
 
 <div id="hint">
-  Desktop: drag · scroll · click node<br>
-  Quest VR: L-stick = move · R-stick Y = fly · Trigger = inspect · Both pinch = zoom · R-pinch = grab
+  Desktop: drag · scroll · click node to read<br>
+  Quest VR: L-stick = move · R-stick Y = fly · Trigger = read note · Both pinch = zoom · R-pinch = grab
 </div>
 
+<!-- Note content panel -->
+<div id="note-panel">
+  <div id="note-header">
+    <div id="note-title">—</div>
+    <button id="note-close">✕</button>
+  </div>
+  <div id="note-body"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
 <script type="module">
 // ─────────────────────────────────────────────────────────────────────────────
-// Imports  (esm.sh CDN — works on Quest 3 browser)
+// Imports
 // ─────────────────────────────────────────────────────────────────────────────
 import * as THREE          from 'https://esm.sh/three@0.153.0';
 import { VRButton }        from 'https://esm.sh/three@0.153.0/examples/jsm/webxr/VRButton.js';
@@ -109,12 +164,12 @@ const prog = (pct, msg) => {
 // Folder → colour
 // ─────────────────────────────────────────────────────────────────────────────
 const PALETTE = {
-  CLUE:     0x00ffff,  // neon cyan
-  HOME:     0x39ff14,  // neon green
-  PHYSICAL: 0xff6600,  // neon orange
-  XVY:      0xff00ff,  // hot magenta
-  ALSTOM:   0x00b4ff,  // electric blue
-  FINANCE:  0xffe600,  // electric yellow
+  CLUE:     0x00ffff,
+  HOME:     0x39ff14,
+  PHYSICAL: 0xff6600,
+  XVY:      0xff00ff,
+  FINANCE:  0xffe600,
+  AI:       0x00b4ff,
 };
 const folderClr = f => PALETTE[f?.toUpperCase()] ?? 0x889aaa;
 
@@ -160,8 +215,7 @@ scene.add(accentLight);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// World group  — all graph content lives here.
-// Moving this group is how VR locomotion works (move world ≡ move player).
+// World group
 // ─────────────────────────────────────────────────────────────────────────────
 const world = new THREE.Group();
 scene.add(world);
@@ -219,12 +273,10 @@ function forceLayout(nodes, links, steps = 280) {
   });
 
   const tmp = new THREE.Vector3();
-
   for (let it = 0; it < steps; it++) {
     const F = {};
     nodes.forEach(n => { F[n.id] = new THREE.Vector3(); });
 
-    // Repulsion (all pairs)
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         tmp.copy(pos[nodes[i].id]).sub(pos[nodes[j].id]);
@@ -235,7 +287,6 @@ function forceLayout(nodes, links, steps = 280) {
       }
     }
 
-    // Attraction (linked pairs)
     links.forEach(l => {
       if (!pos[l.source] || !pos[l.target]) return;
       tmp.copy(pos[l.target]).sub(pos[l.source]);
@@ -245,10 +296,7 @@ function forceLayout(nodes, links, steps = 280) {
       F[l.target].sub(tmp);
     });
 
-    // Centre gravity
     nodes.forEach(n => { F[n.id].addScaledVector(pos[n.id], -0.007); });
-
-    // Integrate
     nodes.forEach(n => {
       vel[n.id].add(F[n.id]).multiplyScalar(0.83);
       pos[n.id].add(vel[n.id]);
@@ -258,89 +306,99 @@ function forceLayout(nodes, links, steps = 280) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Load graph data and build scene
+// Build scene from graph data
+// ─────────────────────────────────────────────────────────────────────────────
+let nodeMeshes = [];
+let selected = null;
+const raycaster = new THREE.Raycaster();
+const pointer   = new THREE.Vector2();
+const infoEl    = document.getElementById('info');
+
+async function buildScene(graphData) {
+  // Clear existing world content
+  while (world.children.length) world.remove(world.children[0]);
+  nodeMeshes = [];
+  selected = null;
+
+  const { nodes, links } = graphData;
+
+  const deg = {};
+  nodes.forEach(n => { deg[n.id] = 0; });
+  links.forEach(l => {
+    deg[l.source] = (deg[l.source] || 0) + 1;
+    deg[l.target] = (deg[l.target] || 0) + 1;
+  });
+
+  const positions = forceLayout(nodes, links);
+
+  const matCache = {};
+  function getMat(col) {
+    if (!matCache[col]) {
+      matCache[col] = new THREE.MeshStandardMaterial({
+        color: col, emissive: col, emissiveIntensity: 0.45,
+        roughness: 0.25, metalness: 0.65,
+      });
+    }
+    return matCache[col];
+  }
+
+  nodes.forEach((node, idx) => {
+    const col = folderClr(node.folder);
+    const radius = 0.5 + Math.min(deg[node.id] || 0, 12) * 0.17;
+
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 18, 14),
+      getMat(col)
+    );
+    mesh.position.copy(positions[node.id]);
+    mesh.userData = { node, col, radius, breathOffset: idx * 0.41 };
+    world.add(mesh);
+    nodeMeshes.push(mesh);
+
+    const label = makeLabel(node.name, col);
+    label.position.copy(positions[node.id]);
+    label.position.y += radius + 1.4;
+    world.add(label);
+  });
+
+  // Edges
+  {
+    const verts = [];
+    links.forEach(l => {
+      if (positions[l.source] && positions[l.target]) {
+        verts.push(...positions[l.source].toArray(), ...positions[l.target].toArray());
+      }
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    world.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      color: 0x1a3355, transparent: true, opacity: 0.5,
+    })));
+  }
+
+  // Legend
+  {
+    const el = document.getElementById('legend');
+    el.innerHTML = '';
+    const folders = [...new Set(nodes.map(n => n.folder))].sort();
+    folders.forEach(f => {
+      const hex = folderClr(f).toString(16).padStart(6, '0');
+      const div = document.createElement('div');
+      div.className = 'li';
+      div.innerHTML = `<div class="dot" style="background:#${hex}"></div>${f}`;
+      el.appendChild(div);
+    });
+    document.getElementById('stats').textContent = `${nodes.length} notes · ${links.length} links`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load graph + build
 // ─────────────────────────────────────────────────────────────────────────────
 prog(10, 'Fetching graph data…');
-const { nodes, links } = await fetch('graph.json').then(r => r.json());
-
-prog(30, `${nodes.length} pages · ${links.length} links — computing layout…`);
-
-// Node degree (for sizing)
-const deg = {};
-nodes.forEach(n => { deg[n.id] = 0; });
-links.forEach(l => {
-  deg[l.source] = (deg[l.source] || 0) + 1;
-  deg[l.target] = (deg[l.target] || 0) + 1;
-});
-
-// Run layout
-const positions = forceLayout(nodes, links);
-
-prog(65, 'Building 3D graph…');
-
-// Material cache (shared per colour)
-const matCache = {};
-function getMat(col) {
-  if (!matCache[col]) {
-    matCache[col] = new THREE.MeshStandardMaterial({
-      color: col, emissive: col, emissiveIntensity: 0.45,
-      roughness: 0.25, metalness: 0.65,
-    });
-  }
-  return matCache[col];
-}
-
-// Build node meshes + labels
-const nodeMeshes = [];
-
-nodes.forEach((node, idx) => {
-  const col = folderClr(node.folder);
-  const radius = 0.5 + Math.min(deg[node.id] || 0, 12) * 0.17;
-
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 18, 14),
-    getMat(col)
-  );
-  mesh.position.copy(positions[node.id]);
-  mesh.userData = { node, col, radius, breathOffset: idx * 0.41 };
-  world.add(mesh);
-  nodeMeshes.push(mesh);
-
-  const label = makeLabel(node.name, col);
-  label.position.copy(positions[node.id]);
-  label.position.y += radius + 1.4;
-  world.add(label);
-});
-
-// Build edges
-{
-  const verts = [];
-  links.forEach(l => {
-    if (positions[l.source] && positions[l.target]) {
-      verts.push(...positions[l.source].toArray(), ...positions[l.target].toArray());
-    }
-  });
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  world.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-    color: 0x1a3355, transparent: true, opacity: 0.5,
-  })));
-}
-
-// Legend
-{
-  const el = document.getElementById('legend');
-  const folders = [...new Set(nodes.map(n => n.folder))].sort();
-  folders.forEach(f => {
-    const hex = folderClr(f).toString(16).padStart(6, '0');
-    const div = document.createElement('div');
-    div.className = 'li';
-    div.innerHTML = `<div class="dot" style="background:#${hex}"></div>${f}`;
-    el.appendChild(div);
-  });
-  document.getElementById('stats').textContent = `${nodes.length} pages · ${links.length} links`;
-}
-
+const graphData = await fetch('graph.json').then(r => r.json());
+prog(30, `${graphData.nodes.length} notes · ${graphData.links.length} links — computing layout…`);
+await buildScene(graphData);
 prog(100, 'Ready!');
 setTimeout(() => {
   const ov = document.getElementById('overlay');
@@ -349,13 +407,60 @@ setTimeout(() => {
 }, 350);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SSE — live reload when vault changes
+// ─────────────────────────────────────────────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.addEventListener('graph_update', async () => {
+    console.log('[VR Brain] Graph updated — reloading…');
+    try {
+      const fresh = await fetch('graph.json?t=' + Date.now()).then(r => r.json());
+      await buildScene(fresh);
+    } catch(e) {
+      console.warn('Graph reload failed:', e);
+    }
+  });
+  es.onerror = () => {
+    setTimeout(connectSSE, 3000); // reconnect on drop
+  };
+}
+connectSSE();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Note content panel
+// ─────────────────────────────────────────────────────────────────────────────
+const notePanel = document.getElementById('note-panel');
+const noteTitle = document.getElementById('note-title');
+const noteBody  = document.getElementById('note-body');
+
+document.getElementById('note-close').addEventListener('click', closeNotePanel);
+
+function closeNotePanel() {
+  notePanel.classList.remove('open');
+}
+
+async function openNote(node) {
+  noteTitle.textContent = `📄 ${node.name}`;
+  noteBody.innerHTML = '<em style="color:#334">Loading…</em>';
+  notePanel.classList.add('open');
+  try {
+    const res = await fetch('/content?path=' + encodeURIComponent(node.path));
+    if (!res.ok) throw new Error('Not found');
+    const { content } = await res.json();
+    // Use marked if available, else plaintext
+    if (window.marked) {
+      noteBody.innerHTML = marked.parse(content);
+    } else {
+      noteBody.innerHTML = '<pre>' + content.replace(/</g,'&lt;') + '</pre>';
+    }
+  } catch(e) {
+    noteBody.innerHTML = `<em style="color:#844">Could not load note: ${e.message}</em>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Desktop raycasting + selection
 // ─────────────────────────────────────────────────────────────────────────────
-const raycaster = new THREE.Raycaster();
-const pointer   = new THREE.Vector2();
-let selected = null;
-const infoEl = document.getElementById('info');
-
 renderer.domElement.addEventListener('click', e => {
   if (renderer.xr.isPresenting) return;
   pointer.x =  (e.clientX / innerWidth)  * 2 - 1;
@@ -363,7 +468,7 @@ renderer.domElement.addEventListener('click', e => {
   raycaster.setFromCamera(pointer, camera);
   const hits = raycaster.intersectObjects(nodeMeshes);
   if (hits.length) pickNode(hits[0].object);
-  else clearPick();
+  else { clearPick(); closeNotePanel(); }
 });
 
 function pickNode(mesh) {
@@ -378,6 +483,7 @@ function pickNode(mesh) {
   document.getElementById('iname').textContent = nd.name;
   document.getElementById('ipath').textContent = `📁 ${nd.folder}  ·  ${nd.path}`;
   infoEl.style.display = 'block';
+  openNote(nd);
 }
 
 function clearPick() {
@@ -390,16 +496,13 @@ function clearPick() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VR controllers
+// VR controllers + hand models
 // ─────────────────────────────────────────────────────────────────────────────
 const ctrl0 = renderer.xr.getController(0);
 const ctrl1 = renderer.xr.getController(1);
 scene.add(ctrl0);
 scene.add(ctrl1);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hand models
-// ─────────────────────────────────────────────────────────────────────────────
 const handFactory = new XRHandModelFactory();
 const hand0 = renderer.xr.getHand(0);
 const hand1 = renderer.xr.getHand(1);
@@ -408,7 +511,6 @@ hand1.add(handFactory.createHandModel(hand1, 'spheres'));
 scene.add(hand0);
 scene.add(hand1);
 
-// Controller ray lines
 [ctrl0, ctrl1].forEach(c => {
   const geo = new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(0, 0, 0),
@@ -420,11 +522,12 @@ scene.add(hand1);
   c.addEventListener('selectstart', () => vrSelect(c));
 });
 
-// VR select — show floating info panel
+// VR select — floating content panel in 3D
 const rayMat = new THREE.Matrix4();
 let vrPanel = null;
+let vrContentPanel = null;
 
-function vrSelect(ctrl) {
+async function vrSelect(ctrl) {
   rayMat.identity().extractRotation(ctrl.matrixWorld);
   raycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
   raycaster.ray.direction.set(0, 0, -1).applyMatrix4(rayMat);
@@ -432,9 +535,9 @@ function vrSelect(ctrl) {
   if (!hits.length) return;
 
   const nd = hits[0].object.userData.node;
-  if (vrPanel) scene.remove(vrPanel);
 
-  // Draw panel on canvas
+  // Small label panel (name + path)
+  if (vrPanel) scene.remove(vrPanel);
   const cv = document.createElement('canvas');
   cv.width = 512; cv.height = 130;
   const cx = cv.getContext('2d');
@@ -446,10 +549,10 @@ function vrSelect(ctrl) {
   cx.fillStyle = '#00e5ff';
   cx.font = 'bold 44px Arial';
   cx.textAlign = 'center';
-  cx.fillText(nd.name, 256, 56);
+  cx.fillText(nd.name, 256, 52);
   cx.fillStyle = '#607888';
   cx.font = '22px Arial';
-  cx.fillText(`${nd.folder}  ·  ${nd.path}`, 256, 100);
+  cx.fillText(`${nd.folder}  ·  ${nd.path}`, 256, 96);
 
   const tex = new THREE.CanvasTexture(cv);
   vrPanel = new THREE.Mesh(
@@ -460,14 +563,76 @@ function vrSelect(ctrl) {
   vrPanel.position.y += 1.9;
   vrPanel.quaternion.copy(camera.quaternion);
   scene.add(vrPanel);
-  setTimeout(() => { if (vrPanel) { scene.remove(vrPanel); vrPanel = null; } }, 5000);
+
+  // Load and show note content in larger VR panel
+  if (vrContentPanel) scene.remove(vrContentPanel);
+  try {
+    const res = await fetch('/content?path=' + encodeURIComponent(nd.path));
+    if (res.ok) {
+      const { content } = await res.json();
+      const lines = content.split('\n').slice(0, 28); // first 28 lines
+      const cv2 = document.createElement('canvas');
+      cv2.width = 900; cv2.height = 700;
+      const cx2 = cv2.getContext('2d');
+      cx2.fillStyle = 'rgba(2,8,30,.97)';
+      cx2.fillRect(0, 0, 900, 700);
+      cx2.strokeStyle = 'rgba(170,0,255,.4)';
+      cx2.lineWidth = 2;
+      cx2.strokeRect(1, 1, 898, 698);
+      cx2.font = 'bold 24px monospace';
+      cx2.textAlign = 'left';
+      let y = 38;
+      for (const line of lines) {
+        const trimmed = line.trimEnd();
+        // Heading detection
+        if (trimmed.startsWith('# ')) {
+          cx2.fillStyle = '#00e5ff';
+          cx2.font = 'bold 26px system-ui';
+          cx2.fillText(trimmed.slice(2), 24, y);
+          cx2.font = '20px monospace';
+        } else if (trimmed.startsWith('## ')) {
+          cx2.fillStyle = '#88ddff';
+          cx2.font = 'bold 22px system-ui';
+          cx2.fillText(trimmed.slice(3), 24, y);
+          cx2.font = '20px monospace';
+        } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+          cx2.fillStyle = 'rgba(200,220,255,.7)';
+          cx2.font = '20px monospace';
+          cx2.fillText('• ' + trimmed.slice(2), 30, y);
+        } else if (trimmed === '' || trimmed === '---') {
+          cx2.fillStyle = 'rgba(255,255,255,.1)';
+          if (trimmed === '---') cx2.fillRect(24, y - 5, 852, 1);
+        } else {
+          cx2.fillStyle = 'rgba(200,215,230,.75)';
+          cx2.font = '20px monospace';
+          // Truncate long lines
+          const maxW = 852;
+          let t = trimmed;
+          while (cx2.measureText(t).width > maxW && t.length > 0) t = t.slice(0,-1);
+          if (t.length < trimmed.length) t += '…';
+          cx2.fillText(t, 24, y);
+        }
+        y += 24;
+        if (y > 680) break;
+      }
+      const tex2 = new THREE.CanvasTexture(cv2);
+      vrContentPanel = new THREE.Mesh(
+        new THREE.PlaneGeometry(8, 6.2),
+        new THREE.MeshBasicMaterial({ map: tex2, transparent: true, side: THREE.DoubleSide })
+      );
+      vrContentPanel.position.copy(hits[0].point);
+      vrContentPanel.position.y += 5;
+      vrContentPanel.quaternion.copy(camera.quaternion);
+      scene.add(vrContentPanel);
+      setTimeout(() => { if (vrContentPanel) { scene.remove(vrContentPanel); vrContentPanel = null; } }, 12000);
+    }
+  } catch(e) { /* silent */ }
+
+  setTimeout(() => { if (vrPanel) { scene.remove(vrPanel); vrPanel = null; } }, 12000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VR locomotion  (world moves, player stays — equivalent to flying through graph)
-// Left stick  → move forward/back/strafe
-// Right stick Y → fly up/down
-// Right stick X → rotate (turn-in-place)
+// VR locomotion
 // ─────────────────────────────────────────────────────────────────────────────
 const _fwd = new THREE.Vector3();
 const _rgt = new THREE.Vector3();
@@ -476,34 +641,25 @@ const _up  = new THREE.Vector3(0, 1, 0);
 function locomote() {
   const sess = renderer.xr.getSession();
   if (!sess) return;
-
   const xrCam = renderer.xr.getCamera(camera);
   const speed = 0.1;
-
   for (const src of sess.inputSources) {
     if (!src.gamepad) continue;
     const ax = src.gamepad.axes;
-    const lx = ax[2] ?? 0;  // thumbstick X
-    const ly = ax[3] ?? 0;  // thumbstick Y
-
+    const lx = ax[2] ?? 0;
+    const ly = ax[3] ?? 0;
     if (src.handedness === 'left') {
-      // Forward / strafe
       if (Math.abs(lx) > 0.12 || Math.abs(ly) > 0.12) {
         xrCam.getWorldDirection(_fwd);
         _fwd.y = 0;
         if (_fwd.lengthSq() < 0.001) _fwd.set(0, 0, -1);
         _fwd.normalize();
         _rgt.crossVectors(_fwd, _up).normalize();
-        // Move world opposite direction = player moves forward
         world.position.addScaledVector(_fwd,  ly * speed);
         world.position.addScaledVector(_rgt, -lx * speed);
       }
     } else {
-      // Vertical fly
-      if (Math.abs(ly) > 0.12) {
-        world.position.y += ly * speed;
-      }
-      // Snap / smooth turn — rotate world around HMD position
+      if (Math.abs(ly) > 0.12) world.position.y += ly * speed;
       if (Math.abs(lx) > 0.12) {
         const camWP = new THREE.Vector3();
         xrCam.getWorldPosition(camWP);
@@ -517,31 +673,13 @@ function locomote() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Resize
+// Two-hand pinch → zoom + rotate | Right-hand pinch → grab
 // ─────────────────────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Two-hand pinch → zoom + rotate  |  Right-hand pinch alone → grab
-// ─────────────────────────────────────────────────────────────────────────────
-let prevPinchDist    = null;
-let prevRightGrabPos = null;
-let prevHandVec      = null;
-const _lPinch    = new THREE.Vector3();
-const _rPinch    = new THREE.Vector3();
-const _handVec   = new THREE.Vector3();
-const _deltaQuat = new THREE.Quaternion();
-
-// Hysteresis: tighter threshold to START pinching, looser to RELEASE
-// Prevents accidental triggers and flickering
-const PINCH_ENTER = 0.025; // 2.5 cm — must close this far to begin
-const PINCH_EXIT  = 0.05;  // 5.0 cm — must open this far to end
-let leftWasPinching  = false;
-let rightWasPinching = false;
+let prevPinchDist = null, prevRightGrabPos = null, prevHandVec = null;
+const _lPinch = new THREE.Vector3(), _rPinch = new THREE.Vector3();
+const _handVec = new THREE.Vector3(), _deltaQuat = new THREE.Quaternion();
+const PINCH_ENTER = 0.025, PINCH_EXIT = 0.05;
+let leftWasPinching = false, rightWasPinching = false;
 
 function handlePinchZoom(frame) {
   if (!frame) return;
@@ -551,7 +689,6 @@ function handlePinchZoom(frame) {
   if (!refSpace) return;
 
   let leftPinching = false, rightPinching = false;
-
   for (const src of sess.inputSources) {
     if (!src.hand) continue;
     const thumbTip = src.hand.get('thumb-tip');
@@ -560,46 +697,29 @@ function handlePinchZoom(frame) {
     const tPose = frame.getJointPose(thumbTip, refSpace);
     const iPose = frame.getJointPose(indexTip, refSpace);
     if (!tPose || !iPose) continue;
-
-    const tp = tPose.transform.position;
-    const ip = iPose.transform.position;
-    const dist = Math.hypot(tp.x - ip.x, tp.y - ip.y, tp.z - ip.z);
-
-    // Hysteresis: use different thresholds to enter vs exit pinch state
+    const tp = tPose.transform.position, ip = iPose.transform.position;
+    const dist = Math.hypot(tp.x-ip.x, tp.y-ip.y, tp.z-ip.z);
     const wasP = src.handedness === 'left' ? leftWasPinching : rightWasPinching;
     const pinching = wasP ? dist < PINCH_EXIT : dist < PINCH_ENTER;
-    if (src.handedness === 'left')  leftWasPinching  = pinching;
-    else                            rightWasPinching = pinching;
-
-    const mid = new THREE.Vector3(
-      (tp.x + ip.x) / 2,
-      (tp.y + ip.y) / 2,
-      (tp.z + ip.z) / 2
-    );
-    if (src.handedness === 'left')  { leftPinching  = pinching; _lPinch.copy(mid); }
+    if (src.handedness === 'left') leftWasPinching = pinching;
+    else rightWasPinching = pinching;
+    const mid = new THREE.Vector3((tp.x+ip.x)/2,(tp.y+ip.y)/2,(tp.z+ip.z)/2);
+    if (src.handedness === 'left')  { leftPinching = pinching;  _lPinch.copy(mid); }
     else                            { rightPinching = pinching; _rPinch.copy(mid); }
   }
 
   if (leftPinching && rightPinching) {
-    // ── Two-hand pinch → zoom + rotate ────────────────────────────────────
     const d = _lPinch.distanceTo(_rPinch);
-    // Midpoint of both pinches — pivot for rotation
     const mid = new THREE.Vector3().addVectors(_lPinch, _rPinch).multiplyScalar(0.5);
-    // Unit vector from left pinch to right pinch — encodes orientation
     _handVec.copy(_rPinch).sub(_lPinch).normalize();
-
     if (prevPinchDist !== null && d > 0.01) {
-      // Zoom
       const factor = d / prevPinchDist;
       const next = world.scale.x * factor;
       if (next > 0.01 && next < 6) world.scale.setScalar(next);
-
-      // Rotate — only when orientation changed meaningfully
       if (prevHandVec !== null) {
         const dot = _handVec.dot(prevHandVec);
         if (dot < 0.9998 && dot > -0.9998) {
           _deltaQuat.setFromUnitVectors(prevHandVec, _handVec);
-          // Rotate world around the midpoint of both hands
           world.position.sub(mid);
           world.position.applyQuaternion(_deltaQuat);
           world.quaternion.premultiply(_deltaQuat);
@@ -607,56 +727,39 @@ function handlePinchZoom(frame) {
         }
       }
     }
-
-    prevPinchDist = d;
-    prevHandVec   = _handVec.clone();
-    prevRightGrabPos = null;
-
+    prevPinchDist = d; prevHandVec = _handVec.clone(); prevRightGrabPos = null;
   } else if (rightPinching && !leftPinching) {
-    // ── Right-hand pinch alone → grab & reposition ────────────────────────
-    if (prevRightGrabPos !== null) {
-      const delta = _rPinch.clone().sub(prevRightGrabPos);
-      world.position.add(delta);
-    }
-    prevRightGrabPos = _rPinch.clone();
-    prevPinchDist    = null;
-    prevHandVec      = null;
-
+    if (prevRightGrabPos !== null) world.position.add(_rPinch.clone().sub(prevRightGrabPos));
+    prevRightGrabPos = _rPinch.clone(); prevPinchDist = null; prevHandVec = null;
   } else {
-    // ── No pinch → reset all ──────────────────────────────────────────────
-    prevPinchDist    = null;
-    prevRightGrabPos = null;
-    prevHandVec      = null;
+    prevPinchDist = null; prevRightGrabPos = null; prevHandVec = null;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resize
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Animation loop
 // ─────────────────────────────────────────────────────────────────────────────
 let t = 0;
-
 renderer.setAnimationLoop((timestamp, frame) => {
   t += 0.016;
-
-  // Subtle node breathing pulse
   nodeMeshes.forEach(m => {
     const s = 1 + Math.sin(t * 1.4 + m.userData.breathOffset) * 0.045;
     m.scale.setScalar(m === selected ? 1.6 * s : s);
   });
-
-  // Drifting accent light
   accentLight.position.set(Math.sin(t * 0.25) * 35, 20, Math.cos(t * 0.25) * 35);
-
-  // VR locomotion
   locomote();
-
-  // Pinch-to-zoom (hand tracking)
   handlePinchZoom(frame);
-
-  // Orbit controls only on desktop
   orbit.enabled = !renderer.xr.isPresenting;
   if (orbit.enabled) orbit.update();
-
   renderer.render(scene, camera);
 });
 </script>

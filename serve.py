@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-VR Brain Map — HTTPS local server
-WebXR requires a secure context (HTTPS). This script generates a self-signed
-certificate and serves the app over HTTPS so Quest 3 can access it.
+VR Brain Map — HTTPS local server with live reload + ngrok tunnel
+WebXR requires a secure context (HTTPS).
 
 Usage:
-    python3 serve.py
-
-Then on Quest 3 browser: open the URL printed in the terminal.
-Accept the security warning once (tap Advanced → Proceed).
+    python3 serve.py [--vault /path/to/vault] [--ngrok]
 """
 
-import http.server, ssl, socket, subprocess, os, sys, tempfile, re, json
+import http.server, ssl, socket, subprocess, os, sys, re, json
+import threading, time, hashlib, argparse, queue
+from urllib.parse import urlparse, parse_qs, unquote
 
 PORT = 8443
 DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +19,34 @@ BOLD  = '\033[1m'
 RESET = '\033[0m'
 DIM   = '\033[2m'
 
+# ── CLI args ──────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser()
+parser.add_argument('--vault', default=None,
+    help='Path to Obsidian vault (default: sibling elektro-brain-docs)')
+parser.add_argument('--ngrok', action='store_true',
+    help='Launch ngrok tunnel after starting server')
+args, _ = parser.parse_known_args()
 
+VAULT = args.vault or os.path.expanduser(
+    '~/Desktop/elektro-brain/elektro-brain-docs')
+
+# ── SSE clients registry ──────────────────────────────────────────────────────
+_sse_clients: list[queue.SimpleQueue] = []
+_sse_lock = threading.Lock()
+
+def sse_broadcast(event: str, data: str = ''):
+    msg = f'event: {event}\ndata: {data}\n\n'.encode()
+    with _sse_lock:
+        dead = []
+        for q in _sse_clients:
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _sse_clients.remove(q)
+
+# ── IP helper ─────────────────────────────────────────────────────────────────
 def local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -32,56 +57,41 @@ def local_ip():
     finally:
         s.close()
 
-
+# ── Self-signed cert ──────────────────────────────────────────────────────────
 def ensure_cert(ip):
-    """Generate a self-signed cert valid for the local IP (cached in /tmp)."""
+    import tempfile
     cert = os.path.join(tempfile.gettempdir(), f'vrbrain_{ip.replace(".","_")}.crt')
     key  = os.path.join(tempfile.gettempdir(), f'vrbrain_{ip.replace(".","_")}.key')
     if not os.path.exists(cert):
         print(f'{DIM}Generating self-signed certificate for {ip}…{RESET}')
         subprocess.run([
             'openssl', 'req', '-x509', '-nodes', '-days', '365',
-            '-newkey', 'rsa:2048',
-            '-keyout', key,
-            '-out',    cert,
-            '-subj',   f'/CN={ip}',
+            '-newkey', 'rsa:2048', '-keyout', key, '-out', cert,
+            '-subj', f'/CN={ip}',
             '-addext', f'subjectAltName=IP:{ip},IP:127.0.0.1',
         ], check=True, capture_output=True)
     return cert, key
 
-
-class QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=DIR, **kwargs)
-
-    def log_message(self, fmt, *args):
-        # Only log errors, not every request
-        if args and str(args[1]) not in ('200', '304'):
-            super().log_message(fmt, *args)
-
-
+# ── Graph builder ─────────────────────────────────────────────────────────────
 def build_graph():
-    """Scan parent directory for markdown files and regenerate graph.json."""
-    base = os.path.dirname(DIR)   # one level up from VR_BRAIN
     nodes, node_map = [], {}
-
-    for root, dirs, files in os.walk(base):
-        if 'VR_BRAIN' in root:
-            continue
+    for root, dirs, files in os.walk(VAULT):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
         for f in files:
             if not f.endswith('.md'):
                 continue
             path = os.path.join(root, f)
-            rel  = os.path.relpath(path, base)
+            rel  = os.path.relpath(path, VAULT)
             name = f[:-3]
-            folder = rel.split(os.sep)[0] if os.sep in rel else 'ROOT'
+            parts = rel.replace('\\', '/').split('/')
+            folder = parts[0] if len(parts) > 1 else 'ROOT'
             node_id = rel.replace(os.sep, '/').replace('.md', '')
             node_map[name.upper()] = node_id
             nodes.append({'id': node_id, 'name': name, 'folder': folder, 'path': rel})
 
     links = []
     for node in nodes:
-        path = os.path.join(base, node['path'])
+        path = os.path.join(VAULT, node['path'])
         try:
             content = open(path, encoding='utf-8', errors='ignore').read()
         except Exception:
@@ -94,42 +104,165 @@ def build_graph():
     out = os.path.join(DIR, 'graph.json')
     with open(out, 'w') as fh:
         json.dump({'nodes': nodes, 'links': links}, fh)
-    print(f'  Graph rebuilt: {len(nodes)} pages · {len(links)} links')
+    print(f'  Graph rebuilt: {len(nodes)} notes · {len(links)} links')
+    return len(nodes), len(links)
 
+# ── File watcher ──────────────────────────────────────────────────────────────
+def _vault_fingerprint():
+    h = hashlib.md5()
+    for root, dirs, files in os.walk(VAULT):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+        for f in sorted(files):
+            if f.endswith('.md'):
+                fp = os.path.join(root, f)
+                try:
+                    stat = os.stat(fp)
+                    h.update(f'{fp}:{stat.st_mtime}:{stat.st_size}'.encode())
+                except OSError:
+                    pass
+    return h.hexdigest()
 
+def watcher_thread():
+    prev = _vault_fingerprint()
+    while True:
+        time.sleep(2)
+        try:
+            cur = _vault_fingerprint()
+            if cur != prev:
+                prev = cur
+                build_graph()
+                sse_broadcast('graph_update', 'reload')
+        except Exception as e:
+            print(f'  Watcher error: {e}')
+
+# ── HTTP handler ──────────────────────────────────────────────────────────────
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=DIR, **kwargs)
+
+    def log_message(self, fmt, *args):
+        if args and str(args[1]) not in ('200', '304'):
+            super().log_message(fmt, *args)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+
+        # ── SSE live-reload endpoint ──────────────────────────────────────
+        if parsed.path == '/events':
+            q: queue.SimpleQueue = queue.SimpleQueue()
+            with _sse_lock:
+                _sse_clients.append(q)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                while True:
+                    try:
+                        msg = q.get(timeout=25)
+                        self.wfile.write(msg)
+                        self.wfile.flush()
+                    except queue.Empty:
+                        # heartbeat
+                        self.wfile.write(b': ping\n\n')
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                with _sse_lock:
+                    try:
+                        _sse_clients.remove(q)
+                    except ValueError:
+                        pass
+            return
+
+        # ── Note content endpoint ─────────────────────────────────────────
+        if parsed.path == '/content':
+            qs = parse_qs(parsed.query)
+            rel_path = qs.get('path', [''])[0]
+            rel_path = unquote(rel_path).replace('..', '')  # safety
+            full = os.path.join(VAULT, rel_path)
+            if not full.startswith(VAULT):
+                self.send_error(403)
+                return
+            try:
+                content = open(full, encoding='utf-8', errors='replace').read()
+                data = json.dumps({'path': rel_path, 'content': content}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', len(data))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(data)
+            except FileNotFoundError:
+                self.send_error(404)
+            return
+
+        # ── Static files (default) ────────────────────────────────────────
+        super().do_GET()
+
+# ── ngrok ────────────────────────────────────────────────────────────────────
+def launch_ngrok():
+    ngrok_bin = subprocess.run(['which', 'ngrok'], capture_output=True, text=True).stdout.strip()
+    if not ngrok_bin:
+        print(f'  {DIM}ngrok not found — skipping tunnel{RESET}')
+        return
+    print(f'  Starting ngrok tunnel…')
+    proc = subprocess.Popen(
+        [ngrok_bin, 'http', f'https://localhost:{PORT}', '--log=stdout'],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    # Wait for tunnel URL
+    for line in proc.stdout:
+        if 'url=' in line or 'Forwarding' in line:
+            url = re.search(r'https://[a-z0-9\-]+\.ngrok[^\s"]+', line)
+            if url:
+                print(f'\n  {BOLD}{CYAN}  🌐  ngrok tunnel: {url.group()}{RESET}')
+                break
+        if 'error' in line.lower():
+            print(f'  ngrok error: {line.strip()}')
+            break
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    ip   = local_ip()
+    ip = local_ip()
+    print(f'\n  Vault: {VAULT}')
     build_graph()
     cert, key = ensure_cert(ip)
 
-    httpd = http.server.HTTPServer(('0.0.0.0', PORT), QuietHandler)
-    ctx   = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server = http.server.ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+
+    # Start file watcher
+    t = threading.Thread(target=watcher_thread, daemon=True)
+    t.start()
+
+    # Optional ngrok
+    if args.ngrok or '--ngrok' in sys.argv:
+        nt = threading.Thread(target=launch_ngrok, daemon=True)
+        nt.start()
 
     url = f'https://{ip}:{PORT}'
-
     print()
     print(f'{BOLD}{CYAN}  🧠  VR BRAIN MAP  —  HTTPS Server{RESET}')
-    print(f'  {"─" * 40}')
-    print(f'  Local:   {BOLD}https://localhost:{PORT}{RESET}')
-    print(f'  Quest 3: {BOLD}{CYAN}{url}{RESET}')
+    print(f'  {"─" * 44}')
+    print(f'  Local:      {BOLD}https://localhost:{PORT}{RESET}')
+    print(f'  Network:    {BOLD}{CYAN}{url}{RESET}')
+    print(f'  Live reload: watching vault for changes')
     print()
-    print(f'  {BOLD}How to open on Quest 3:{RESET}')
-    print(f'  1. Make sure Quest 3 is on the same Wi-Fi as this Mac')
-    print(f'  2. Open Meta Quest Browser')
-    print(f'  3. Navigate to: {CYAN}{url}{RESET}')
-    print(f'  4. Tap {BOLD}Advanced → Proceed{RESET} on the certificate warning')
-    print(f'  5. Tap the {BOLD}Enter VR{RESET} button that appears')
+    print(f'  {BOLD}Quest 3:{RESET} open {CYAN}{url}{RESET} → Advanced → Proceed → Enter VR')
     print()
-    print(f'  {DIM}Press Ctrl+C to stop the server{RESET}')
+    print(f'  {DIM}Press Ctrl+C to stop{RESET}')
     print()
 
     try:
-        httpd.serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
         print(f'\n  {DIM}Server stopped.{RESET}\n')
-
 
 if __name__ == '__main__':
     main()

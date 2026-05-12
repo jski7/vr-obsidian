@@ -327,14 +327,24 @@ function makeLabel(text, hexCol) {
 // ─────────────────────────────────────────────────────────────────────────────
 function forceLayout(nodes, links, steps = 280) {
   const pos = {}, vel = {};
+
+  // Seed nodes in folder-grouped clusters around a sphere
+  const folders = [...new Set(nodes.map(n => n.folder))];
+  const folderOrigin = {};
+  folders.forEach((f, i) => {
+    const θ = (i / folders.length) * Math.PI * 2;
+    const r = 28;
+    folderOrigin[f] = new THREE.Vector3(
+      r * Math.cos(θ), (Math.random() - 0.5) * 20, r * Math.sin(θ)
+    );
+  });
+
   nodes.forEach(n => {
-    const θ = Math.random() * Math.PI * 2;
-    const φ = Math.acos(2 * Math.random() - 1);
-    const r = 14 + Math.random() * 16;
+    const o = folderOrigin[n.folder];
     pos[n.id] = new THREE.Vector3(
-      r * Math.sin(φ) * Math.cos(θ),
-      r * Math.sin(φ) * Math.sin(θ),
-      r * Math.cos(φ)
+      o.x + (Math.random() - 0.5) * 10,
+      o.y + (Math.random() - 0.5) * 10,
+      o.z + (Math.random() - 0.5) * 10
     );
     vel[n.id] = new THREE.Vector3();
   });
@@ -344,6 +354,7 @@ function forceLayout(nodes, links, steps = 280) {
     const F = {};
     nodes.forEach(n => { F[n.id] = new THREE.Vector3(); });
 
+    // Repulsion between all nodes
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         tmp.copy(pos[nodes[i].id]).sub(pos[nodes[j].id]);
@@ -354,6 +365,7 @@ function forceLayout(nodes, links, steps = 280) {
       }
     }
 
+    // Link attraction
     links.forEach(l => {
       if (!pos[l.source] || !pos[l.target]) return;
       tmp.copy(pos[l.target]).sub(pos[l.source]);
@@ -363,6 +375,18 @@ function forceLayout(nodes, links, steps = 280) {
       F[l.target].sub(tmp);
     });
 
+    // Folder clustering — pull each node toward its folder centroid
+    const centroid = {};
+    const count = {};
+    folders.forEach(f => { centroid[f] = new THREE.Vector3(); count[f] = 0; });
+    nodes.forEach(n => { centroid[n.folder].add(pos[n.id]); count[n.folder]++; });
+    folders.forEach(f => { if (count[f] > 0) centroid[f].divideScalar(count[f]); });
+    nodes.forEach(n => {
+      tmp.copy(centroid[n.folder]).sub(pos[n.id]);
+      F[n.id].addScaledVector(tmp, 0.018);
+    });
+
+    // Global gravity toward origin
     nodes.forEach(n => { F[n.id].addScaledVector(pos[n.id], -0.007); });
     nodes.forEach(n => {
       vel[n.id].add(F[n.id]).multiplyScalar(0.83);
